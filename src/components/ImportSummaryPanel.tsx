@@ -50,7 +50,7 @@ export default function ImportSummaryPanel() {
           animate={{ opacity: 1, x: 0, scale: 1 }}
           exit={{ opacity: 0, x: 18, scale: 0.985 }}
           transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
-          className="fixed right-5 top-[76px] z-[80] w-[380px] max-w-[calc(100vw-40px)] overflow-hidden rounded-md border border-white/[0.11] bg-[#232423]/[0.98] shadow-[0_20px_70px_rgba(0,0,0,0.48)] backdrop-blur-xl"
+          className="fixed right-5 top-[76px] z-summary w-[380px] max-w-[calc(100vw-40px)] overflow-hidden rounded-md border border-white/[0.11] bg-abyss-50/[0.98] shadow-overlay backdrop-blur-xl"
           aria-label="同步完成摘要"
         >
           <div className="flex items-start gap-3 border-b border-white/[0.07] px-4 py-3.5">

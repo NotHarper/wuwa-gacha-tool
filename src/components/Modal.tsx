@@ -28,6 +28,13 @@ export default function Modal({
   const closeDisabledRef = useRef(closeDisabled);
   const lastChildrenRef = useRef(children);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
+  /*
+   * 点遮罩关闭要求「按下」和「松开」都落在遮罩上。
+   *
+   * 原来只监听遮罩的 mousedown，按下即关：在弹窗内按住鼠标拖到遮罩上再松手会关掉，
+   * 在输入框里选中文字一旦拖出边界也会关掉，都不符合桌面预期。
+   */
+  const pressStartedOnOverlayRef = useRef(false);
 
   if (open) lastChildrenRef.current = children;
 
@@ -90,7 +97,7 @@ export default function Modal({
       {open && (
         <motion.div
           className={cn(
-            'fixed inset-0 z-50 flex overflow-y-auto bg-black/65 px-4 backdrop-blur-[3px]',
+            'fixed inset-0 z-modal flex overflow-y-auto bg-black/65 px-4 backdrop-blur-[3px]',
             placement === 'top'
               ? 'items-start justify-center pb-8 pt-[clamp(56px,12vh,96px)]'
               : 'items-center justify-center py-8',
@@ -103,7 +110,12 @@ export default function Modal({
           }}
           transition={{ duration: 0.2, ease: modalEase }}
           onMouseDown={(event) => {
-            if (event.currentTarget === event.target && !closeDisabled) onClose();
+            pressStartedOnOverlayRef.current = event.currentTarget === event.target;
+          }}
+          onClick={(event) => {
+            const bothOnOverlay = pressStartedOnOverlayRef.current && event.currentTarget === event.target;
+            pressStartedOnOverlayRef.current = false;
+            if (bothOnOverlay && !closeDisabled) onClose();
           }}
         >
           <motion.div
@@ -125,7 +137,6 @@ export default function Modal({
               transition: { duration: 0.3, times: [0, 0.18, 1], ease: [0.4, 0, 1, 1] },
             }}
             transition={{ duration: 0.24, ease: modalEase }}
-            onMouseDown={(event) => event.stopPropagation()}
           >
             <div className="pointer-events-none absolute inset-x-10 top-0 h-px bg-gradient-to-r from-transparent via-white/25 to-transparent" />
             {lastChildrenRef.current}

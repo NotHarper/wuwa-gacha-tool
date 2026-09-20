@@ -143,6 +143,17 @@ export default function Tooltip({ children, content, className = '', contentClas
     };
   }, [visible]);
 
+  /*
+   * 键盘聚焦时没有鼠标坐标，改用触发元素自身的位置，其余翻转/夹取逻辑照旧复用。
+   * React 的 onFocus/onBlur 底层是 focusin/focusout，会从内部按钮冒泡到这里，
+   * 所以纯图标按钮用 Tab 聚焦时也能看到说明——之前只绑鼠标事件，键盘完全看不到。
+   */
+  const showFromTrigger = useCallback(() => {
+    const rect = triggerRef.current?.getBoundingClientRect();
+    if (rect) mouseRef.current = { x: rect.left + rect.width / 2, y: rect.bottom };
+    show();
+  }, [show]);
+
   return (
     <>
       <div
@@ -151,13 +162,16 @@ export default function Tooltip({ children, content, className = '', contentClas
         onMouseEnter={show}
         onMouseMove={(e) => { mouseRef.current = { x: e.clientX, y: e.clientY }; }}
         onMouseLeave={hide}
+        onFocus={showFromTrigger}
+        onBlur={hide}
       >
         {children}
       </div>
       {visible && createPortal(
         <div
           ref={tooltipRef}
-          className={`fixed z-[9999] pointer-events-none px-3 py-2 rounded-lg glass-card text-xs shadow-xl whitespace-nowrap ${contentClassName}`}
+          role="tooltip"
+          className={`fixed z-tooltip pointer-events-none px-3 py-2 rounded-lg glass-card text-xs shadow-xl whitespace-nowrap ${contentClassName}`}
           style={{ top: pos.top, left: pos.left }}
         >
           {content}

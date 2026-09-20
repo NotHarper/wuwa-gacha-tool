@@ -1,4 +1,6 @@
+import { useEffect, useRef } from 'react';
 import { useReducedMotion } from 'framer-motion';
+import { useAmbientMotion } from '../hooks/useAmbientMotion';
 
 const secondarySignal = 'M0 68 C114 68 143 69 205 68 C250 67 266 77 304 77 C341 77 360 58 391 58 C424 58 438 72 465 72 C501 72 516 46 548 46 C585 46 603 73 639 73 C684 73 714 67 759 67 C817 67 850 68 900 68';
 const resonanceFieldBootTime = performance.now();
@@ -87,16 +89,29 @@ const silverWaveValues = waveValues(silverDynamics);
 
 export default function ResonanceField() {
   const reduceMotion = useReducedMotion();
+  const ambientActive = useAmbientMotion();
+  const svgRef = useRef<SVGSVGElement>(null);
   const waveDelay = Math.max(0, resonanceFieldStartupBuffer - (performance.now() - resonanceFieldBootTime));
   const waveBegin = `${waveDelay}ms`;
-  const waveBeginGold = `${waveDelay + 180}ms`;
-  const waveBeginSoftGold = `${waveDelay + 320}ms`;
-  const waveBeginSilver = `${waveDelay + 450}ms`;
-  const waveBeginOverlay = `${waveDelay}ms`;
+
+  /*
+   * 这五条曲线是整个应用最贵的常驻动效：SMIL 逐帧插值 d 属性（几何变形，无法提升为
+   * 合成层），其中两条还各套一个高斯模糊滤镜，等于每帧对变形中的路径重跑一次模糊。
+   *
+   * SMIL 不受 CSS animation-play-state 影响，只能用 SVG 自己的时间轴 API。
+   * pauseAnimations / unpauseAnimations 冻结与续跑的是同一条时间轴，
+   * 恢复时波形从冻结处继续，不会重置、也不会重新等待 begin 的启动缓冲。
+   */
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    if (ambientActive) svg.unpauseAnimations();
+    else svg.pauseAnimations();
+  }, [ambientActive]);
 
   return (
-    <div className="pointer-events-none absolute inset-y-[-22px] left-[176px] right-[138px] overflow-hidden" aria-hidden="true">
-      <svg viewBox="0 0 900 128" preserveAspectRatio="none" className="h-full w-full">
+    <div className="resonance-field-canvas pointer-events-none absolute inset-y-[-22px] left-[176px] right-[138px] overflow-hidden" aria-hidden="true">
+      <svg ref={svgRef} viewBox="0 0 900 128" preserveAspectRatio="xMidYMid meet" className="h-full w-full">
         <defs>
           <linearGradient id="resonance-signal" x1="0" y1="0" x2="1" y2="0">
             <stop offset="0" stopColor="#b8b8b8" stopOpacity="0" />
@@ -165,14 +180,14 @@ export default function ResonanceField() {
             fill="none"
             stroke="url(#resonance-phase)"
             strokeWidth="0.72"
-          >{!reduceMotion && <animate attributeName="d" values={silverWaveValues} dur="24s" begin={waveBeginSilver} repeatCount="indefinite" />}</path>
+          >{!reduceMotion && <animate attributeName="d" values={silverWaveValues} dur="24s" begin={waveBegin} repeatCount="indefinite" />}</path>
           <path
             className="resonance-field-string resonance-field-string-soft-gold"
             d={softGoldHarmonic}
             fill="none"
             stroke="url(#resonance-gold-string-soft)"
             strokeWidth="0.85"
-          >{!reduceMotion && <animate attributeName="d" values={softGoldWaveValues} dur="19.5s" begin={waveBeginSoftGold} repeatCount="indefinite" />}</path>
+          >{!reduceMotion && <animate attributeName="d" values={softGoldWaveValues} dur="24s" begin={waveBegin} repeatCount="indefinite" />}</path>
           <path
             className="resonance-field-string resonance-field-string-gold"
             d={goldHarmonic}
@@ -180,7 +195,7 @@ export default function ResonanceField() {
             stroke="url(#resonance-gold-string)"
             strokeWidth="1.05"
             filter="url(#resonance-gold-glow)"
-          >{!reduceMotion && <animate attributeName="d" values={goldWaveValues} dur="22s" begin={waveBeginGold} repeatCount="indefinite" />}</path>
+          >{!reduceMotion && <animate attributeName="d" values={goldWaveValues} dur="24s" begin={waveBegin} repeatCount="indefinite" />}</path>
           <path
             className="resonance-field-primary resonance-field-string resonance-field-string-primary"
             d={primarySignal}
@@ -188,7 +203,7 @@ export default function ResonanceField() {
             stroke="url(#resonance-signal)"
             strokeWidth="1.2"
             filter="url(#resonance-glow)"
-          >{!reduceMotion && <animate attributeName="d" values={primaryWaveValues} dur="18s" begin={waveBegin} repeatCount="indefinite" />}</path>
+          >{!reduceMotion && <animate attributeName="d" values={primaryWaveValues} dur="24s" begin={waveBegin} repeatCount="indefinite" />}</path>
           <path
             className="resonance-field-primary-gold resonance-field-string resonance-field-string-gold-overlay"
             d={primarySignal}
@@ -196,9 +211,9 @@ export default function ResonanceField() {
             stroke="url(#resonance-gold-string-soft)"
             strokeWidth="1"
             strokeDasharray="18 72"
-          >{!reduceMotion && <animate attributeName="d" values={primaryWaveValues} dur="18s" begin={waveBeginOverlay} repeatCount="indefinite" />}</path>
+          >{!reduceMotion && <animate attributeName="d" values={primaryWaveValues} dur="24s" begin={waveBegin} repeatCount="indefinite" />}</path>
 
-          <g transform="translate(480 64)">
+          <g transform="translate(450 64)">
             <path d="M-68 0H-45M45 0H68" stroke="#d4d4d4" strokeOpacity="0.13" strokeWidth="0.7" />
             <path d="M-46 -10A47 47 0 0 1-15-44M15-44A47 47 0 0 1 46-10" fill="none" stroke="#d4d4d4" strokeOpacity="0.13" strokeWidth="0.75" />
             <path d="M46 10A47 47 0 0 1 15 44M-15 44A47 47 0 0 1-46 10" fill="none" stroke="#d8bd84" strokeOpacity="0.34" strokeWidth="0.85" />

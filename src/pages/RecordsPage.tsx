@@ -1281,7 +1281,7 @@ export default function RecordsPage() {
 
                 {viewMode === 'table' && (
                   <table className="resonance-table w-full min-w-[820px] table-fixed text-xs">
-                    <thead className="sticky top-0 z-10 bg-[#1f1f1f] text-wave">
+                    <thead className="sticky top-0 z-sticky bg-surface text-wave">
                       <tr className="border-b border-white/[0.05]">
                         <th className="w-[154px] px-3 py-2.5 text-left font-medium">时间</th>
                         <th className="w-[150px] px-3 py-2.5 text-left font-medium">卡池</th>

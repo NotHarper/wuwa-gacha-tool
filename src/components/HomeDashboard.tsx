@@ -260,7 +260,9 @@ export default function HomeDashboard({ stats, records, confirmedBoundaryPools =
             </div>
             <span className="tech-chip px-2 py-1 text-[10px] text-wave">五星保底 80</span>
           </div>
-          <div className="home-pity-grid mt-2 grid grid-cols-2 gap-x-6">
+          {/* 窗口最小宽度是 1000px，低于 lg(1024) 时主区已退化为单列，
+              垫抽再分两列就会把池名挤到只剩省略号，所以基础值取单列。 */}
+          <div className="home-pity-grid mt-2 grid grid-cols-1 gap-x-6 lg:grid-cols-2">
             {visiblePools.map((pool) => <PityRow key={pool.pool_type} pool={pool} onOpen={() => openRecords(pool.pool_type)} />)}
           </div>
         </GlowCard>

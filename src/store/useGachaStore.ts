@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { gachaApi } from '../services/tauri-api';
+import { MAX_VISIBLE_TOASTS } from '../lib/toast';
 import { playUiFeedback } from '../lib/uiFeedback';
 import type { ClearRecordsResult, GachaRecord, GachaStats, GameSettings, HomeOverview, ImportCompletionSummary, RecordSummary, ToastMessage } from '../types';
 
@@ -327,16 +328,18 @@ export const useGachaStore = create<GachaStore>((set, get) => ({
       get().fetchSummaries().catch(() => {}),
     ]);
     if (activePlayerId) {
-      await get().fetchStats(activePlayerId);
+      // 走 fetchHomeOverview 而不是 fetchStats：它同时刷新
+      // confirmedBoundaryPoolTypes，否则首页和记录页的「≥」下界标记会停留在
+      // 刷新前的状态，和刚拉回来的记录对不上。
+      await get().fetchHomeOverview(activePlayerId);
     }
   },
 
   addToast: (type, message) => {
     const id = Date.now().toString() + Math.random().toString(36).slice(2, 6);
-    set(s => ({ toastMessages: [...s.toastMessages, { id, type, message }] }));
-    setTimeout(() => {
-      get().removeToast(id);
-    }, 3000);
+    // 自动消失的计时交给 Toast 组件：它要在指针悬停时暂停并保留剩余时长，
+    // store 里的裸 setTimeout 做不到，而且会让时长在 store 和 CSS 各存一份。
+    set(s => ({ toastMessages: [...s.toastMessages, { id, type, message }].slice(-MAX_VISIBLE_TOASTS) }));
   },
 
   removeToast: (id) => {

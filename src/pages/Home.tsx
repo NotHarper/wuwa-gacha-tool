@@ -338,6 +338,36 @@ export default function Home() {
     void navigate(`/ocr-import?mode=${mode}`);
   };
 
+  /*
+   * 弹窗主操作抽成具名函数，让底部按钮和输入框里的 Enter 走同一条路径。
+   * 之前只有按钮能触发，在路径/链接输入框按回车什么都不会发生。
+   */
+  const scanBusy = scanning || cloudOpening || previewingImport;
+  const scanInputMissing = scanMode === 'dir'
+    ? !gameDirInput.trim()
+    : scanMode === 'url'
+      ? !urlInput.trim()
+      : scanMode === 'json'
+        ? !jsonPath.trim()
+        : false;
+  const canRunScanAction = !scanBusy && !scanInputMissing;
+
+  const runScanAction = () => {
+    if (!canRunScanAction) return;
+    if (scanMode === 'dir') return void handleScanByDir();
+    if (scanMode === 'cloud') return void (cloudLink ? handleImportCloudUrl() : handleOpenCloud());
+    if (scanMode === 'url') return void handleScanByUrl();
+    if (scanMode === 'json') return void handleImportJson();
+    openBatchImport(scanMode);
+  };
+
+  // 单行输入框里的回车等同于点主按钮。
+  const handleScanInputKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== 'Enter' || event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    runScanAction();
+  };
+
   return (
     <PageTransition>
       <div className="page-container flex h-full flex-col gap-5 overflow-hidden p-6">
@@ -355,7 +385,7 @@ export default function Home() {
 
           <div className="min-h-0 flex-1">
           {!initialized || (activePlayerId && statsPlayerId !== activePlayerId) ? (
-            <div className="resonance-panel h-full" aria-busy="true" aria-label="Loading gacha overview" />
+            <div className="resonance-panel h-full" aria-busy="true" aria-label="正在加载抽卡概览" />
           ) : stats && stats.total_draws > 0 ? (
             <div className="page-scroll h-full overflow-y-auto overflow-x-hidden">
               <HomeDashboard
@@ -382,17 +412,21 @@ export default function Home() {
         <Modal
           open={showScanModal}
           onClose={() => setShowScanModal(false)}
-          closeDisabled={scanning || cloudOpening}
+          // 预检进行中也不能关：主按钮此时是禁用的，弹窗却还能用 Esc / 点遮罩关掉，
+          // 两者必须一致。
+          closeDisabled={scanBusy}
           className="max-w-[480px] p-6"
           labelledBy="scan-dialog-title"
           placement="top"
         >
               <div className="mb-4 flex items-center justify-between gap-4">
                 <h2 id="scan-dialog-title" className="modal-title text-lg font-semibold text-tide">获取抽卡记录</h2>
-                <ResonanceCloseButton onClick={() => setShowScanModal(false)} disabled={scanning || cloudOpening} />
+                <ResonanceCloseButton onClick={() => setShowScanModal(false)} disabled={scanBusy} />
               </div>
 
-              <div className="resonance-segmented mb-4 grid grid-cols-3 gap-1 p-1">
+              {/* 六种导入方式是标准的 tabs，补上 tablist/tab/tabpanel 语义，
+                  否则选中态只由 framer-motion 的高亮块表达，辅助技术读不到。 */}
+              <div className="resonance-segmented mb-4 grid grid-cols-3 gap-1 p-1" role="tablist" aria-label="导入方式">
                 {([
                   ['dir', '游戏同步', 'directory'],
                   ['cloud', '云鸣潮', 'cloud'],
@@ -403,6 +437,11 @@ export default function Home() {
                 ] as const).map(([mode, label, iconKind]) => (
                   <button
                     key={mode}
+                    type="button"
+                    role="tab"
+                    id={`scan-mode-tab-${mode}`}
+                    aria-selected={scanMode === mode}
+                    aria-controls="scan-mode-panel"
                     onClick={() => setScanMode(mode)}
                     disabled={scanning}
                     className={`relative flex flex-1 items-center justify-center gap-1.5 rounded-md px-2 py-2 text-xs ${
@@ -435,6 +474,9 @@ export default function Home() {
               <motion.div
                 ref={scanContentRef}
                 key={scanMode}
+                id="scan-mode-panel"
+                role="tabpanel"
+                aria-labelledby={`scan-mode-tab-${scanMode}`}
                 initial={{ opacity: 0, x: 8 }}
                 animate={{ opacity: 1, x: 0 }}
                 transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
@@ -451,6 +493,7 @@ export default function Home() {
                         value={gameDirInput}
                         displayValue={displayPath(gameDirInput)}
                         onChange={(event) => setGameDirInput(event.target.value)}
+                        onKeyDown={handleScanInputKeyDown}
                         placeholder="例如: E:\Wuthering Waves\Wuthering Waves Game\Client\Saved\Logs\Client.log"
                         containerClassName="min-w-0 flex-1"
                         className="glass-input w-full px-3 py-2 text-sm"
@@ -590,9 +633,10 @@ export default function Home() {
                 <div className="space-y-2">
                   <p className="text-sm text-wave">从本地 JSON 文件导入已有抽卡数据。</p>
                   <div className="mt-3 space-y-2">
-                    <span className="text-sm text-wave">JSON 文件</span>
+                    <label htmlFor="scan-json-path" className="block text-sm text-wave">JSON 文件</label>
                     <div className="flex gap-2">
                       <ShareMaskedInput
+                        id="scan-json-path"
                         type="text"
                         value={jsonPath}
                         displayValue={displayPath(jsonPath)}
@@ -600,6 +644,7 @@ export default function Home() {
                           setJsonPath(event.target.value);
                           setImportPreview(null);
                         }}
+                        onKeyDown={handleScanInputKeyDown}
                         placeholder="选择或输入 JSON 文件路径"
                         containerClassName="min-w-0 flex-1"
                         className="glass-input w-full px-3 py-2 text-sm"
@@ -669,32 +714,20 @@ export default function Home() {
 
               <div className="mt-4 flex gap-3 border-t border-white/[0.06] pt-4">
                 <button
+                  type="button"
                   onClick={() => setShowScanModal(false)}
-                  disabled={scanning}
+                  disabled={scanBusy}
                   className="flex-1 rounded-lg border border-white/[0.1] px-4 py-2 text-wave transition-colors hover:text-tide disabled:opacity-50"
                 >
                   取消
                 </button>
                 <button
-                  onClick={scanMode === 'dir'
-                    ? handleScanByDir
-                    : scanMode === 'cloud'
-                      ? cloudLink ? handleImportCloudUrl : handleOpenCloud
-                      : scanMode === 'url'
-                        ? handleScanByUrl
-                        : scanMode === 'json'
-                          ? handleImportJson
-                          : () => openBatchImport(scanMode)}
-                  disabled={scanning || cloudOpening || previewingImport || (scanMode === 'dir'
-                    ? !gameDirInput.trim()
-                    : scanMode === 'url'
-                      ? !urlInput.trim()
-                      : scanMode === 'json'
-                        ? !jsonPath.trim()
-                        : false)}
+                  type="button"
+                  onClick={runScanAction}
+                  disabled={!canRunScanAction}
                   className="tide-btn flex flex-1 items-center justify-center gap-2 px-4 py-2 disabled:opacity-50"
                 >
-                  {scanning || cloudOpening || previewingImport ? (
+                  {scanBusy ? (
                     <>
                       <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}>
                         <ResonanceActionIcon size="sm" tone="gold"><ResonanceIcon kind="scan" size={14} /></ResonanceActionIcon>
@@ -733,7 +766,7 @@ export default function Home() {
           open={importPreview !== null}
           onClose={closeImportPreview}
           closeDisabled={scanning}
-          className="max-w-lg border-white/[0.08] bg-[#242424]"
+          className="max-w-lg border-white/[0.08] bg-surface-modal"
           labelledBy="import-preview-dialog-title"
         >
           {importPreview && <>

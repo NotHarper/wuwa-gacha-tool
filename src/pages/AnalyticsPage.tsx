@@ -8,7 +8,6 @@ import PageTransition from '../components/PageTransition';
 import PageSignalField from '../components/PageSignalField';
 import ResonanceEmptyState from '../components/ResonanceEmptyState';
 import ResonanceIcon from '../components/ResonanceModeIcon';
-import Tooltip from '../components/Tooltip';
 import ThemedDateInput from '../components/ThemedDateInput';
 import { recordsPath } from '../lib/recordNavigation';
 import { gachaApi } from '../services/tauri-api';
@@ -16,12 +15,41 @@ import { useGachaStore } from '../store/useGachaStore';
 import type { GachaInsights, PityDistributionBin, PoolInsight } from '../types';
 
 const analyticsCache = new Map<string, GachaInsights>();
+/**
+ * 缓存上限。键里含 revision 与自定义日期，反复拖日期会不断产生新键，
+ * 而每份 insights 都带着全部五星区间和 UP 周期明细，不设上限会一直堆积。
+ * Map 保持插入顺序，超出后淘汰最早的一条。
+ */
+const ANALYTICS_CACHE_LIMIT = 8;
+
+function rememberInsights(key: string, data: GachaInsights) {
+  analyticsCache.delete(key);
+  while (analyticsCache.size >= ANALYTICS_CACHE_LIMIT) {
+    const oldest = analyticsCache.keys().next().value;
+    if (oldest === undefined) break;
+    analyticsCache.delete(oldest);
+  }
+  analyticsCache.set(key, data);
+}
 
 const OFFICIAL_FIVE_STAR_RATE = 0.0185;
 const FIVE_STAR_EXPECTED_PULLS = Number((1 / OFFICIAL_FIVE_STAR_RATE).toFixed(1));
 const FEATURED_EXPECTED_PULLS = FIVE_STAR_EXPECTED_PULLS * 1.5;
+/*
+ * 图表调色板。ECharts 的 option 是 JS 对象，拿不到 CSS 变量，
+ * 所以这里集中一份与 index.css token 对应的取值，不在各 option 里散写字面量。
+ */
 const CHART_TEXT = '#9b9d9b';
 const CHART_GRID = 'rgba(255,255,255,0.055)';
+const CHART_TOOLTIP_BG = '#222625';
+const CHART_TOOLTIP_TEXT = '#e2e4e3';
+const CHART_GOLD = '#d8bd84';
+const CHART_GOLD_SOFT = '#e1c98f';
+const CHART_OK = '#8fc8be';
+const CHART_OK_DIM = '#79b9ad';
+const CHART_OK_BRIGHT = '#99d4c9';
+const CHART_DANGER = '#d99a9a';
+const CHART_NEUTRAL = '#bfc4c0';
 const LIMITED_ROLE_POOL_TYPES = new Set(['1', '8', '10', '12']);
 const SOFT_PITY_POOL_TYPES = new Set(['1', '2', '3', '4', '6', '7', '8', '9', '10', '11', '12', '13']);
 const FORECAST_THRESHOLDS = [0.5, 0.8, 0.9, 0.95];
@@ -169,12 +197,18 @@ function buildGachaForecast(pool: PoolInsight, rateAtPity = fiveStarRateAtPity):
   };
 }
 
+const RELIABILITY = {
+  insufficient: { label: '样本较少', tone: '#a7aaa8' },
+  low: { label: '初步趋势', tone: CHART_GOLD },
+  medium: { label: '趋势稳定', tone: '#b9bdb9' },
+  high: { label: '样本充分', tone: '#d0c18f' },
+} as const;
 
 function formatPull(value: number | null) {
   return value === null ? '-' : `${value.toFixed(Number.isInteger(value) ? 0 : 1)} 抽`;
 }
 
-function Metric({ label, value, tone = '#e2e4e3' }: { label: string; value: string; tone?: string }) {
+function Metric({ label, value, tone = CHART_TOOLTIP_TEXT }: { label: string; value: string; tone?: string }) {
   return (
     <div className="analysis-metric min-w-0 px-4 py-3.5">
       <div className="text-[11px] text-wave">{label}</div>
@@ -196,9 +230,9 @@ function buildHistogramOption(
     grid: { left: 42, right: 18, top: 36, bottom: 34 },
     tooltip: {
       trigger: 'item',
-      backgroundColor: '#222625',
+      backgroundColor: CHART_TOOLTIP_BG,
       borderColor: 'rgba(212,212,212,0.2)',
-      textStyle: { color: '#e2e4e3', fontSize: 11 },
+      textStyle: { color: CHART_TOOLTIP_TEXT, fontSize: 11 },
       formatter: (params: { dataIndex: number }) => {
         const bin = bins[params.dataIndex];
         return `${bin.label} 抽<br/><b>${bin.count}</b> 次${tooltipLabel} · ${bin.percentage.toFixed(1)}%`;
@@ -222,16 +256,16 @@ function buildHistogramOption(
       barWidth: maxPull === 80 ? 30 : 22,
       data: bins.map((bin) => [((bin.start + bin.end) / 2), bin.count]),
       itemStyle: {
-        color: '#79b9ad',
+        color: CHART_OK_DIM,
         borderColor: 'rgba(220,238,233,0.2)',
         borderWidth: 1,
         borderRadius: [2, 2, 0, 0],
       },
-      emphasis: { itemStyle: { color: '#99d4c9' } },
+      emphasis: { itemStyle: { color: CHART_OK_BRIGHT } },
       markLine: {
         silent: true,
         symbol: 'none',
-        label: { formatter: expectedLabel, color: '#d8bd84', fontSize: 10, position: 'insideEndTop' },
+        label: { formatter: expectedLabel, color: CHART_GOLD, fontSize: 10, position: 'insideEndTop' },
         lineStyle: { color: 'rgba(216,189,132,0.7)', type: 'dashed', width: 1 },
         data: [{ xAxis: expectedPulls }],
       },
@@ -247,9 +281,9 @@ function buildProbabilityOption(pool: PoolInsight) {
     grid: { left: 44, right: 18, top: 36, bottom: 34 },
     tooltip: {
       trigger: 'axis',
-      backgroundColor: '#222625',
+      backgroundColor: CHART_TOOLTIP_BG,
       borderColor: 'rgba(212,212,212,0.2)',
-      textStyle: { color: '#e2e4e3', fontSize: 11 },
+      textStyle: { color: CHART_TOOLTIP_TEXT, fontSize: 11 },
       formatter: (params: Array<{ dataIndex: number }>) => {
         const point = model[params[0]?.dataIndex ?? 0];
         const formatRate = (value: number | null) => value === null ? '不适用' : `${value.toFixed(1)}%`;
@@ -281,14 +315,14 @@ function buildProbabilityOption(pool: PoolInsight) {
         type: 'line',
         showSymbol: false,
         data: model.map((point) => [point.pull, point.official]),
-        lineStyle: { color: '#d8bd84', width: 1.5, type: 'dashed' },
+        lineStyle: { color: CHART_GOLD, width: 1.5, type: 'dashed' },
       },
       {
         name: '个人校准',
         type: 'line',
         showSymbol: false,
         data: model.map((point) => [point.pull, point.calibrated]),
-        lineStyle: { color: '#8fc8be', width: 2 },
+        lineStyle: { color: CHART_OK, width: 2 },
         areaStyle: { color: 'rgba(143,200,190,0.07)' },
       },
       {
@@ -313,9 +347,9 @@ function buildForecastOption(forecast: GachaForecast) {
     grid: { left: 44, right: 22, top: 34, bottom: 34 },
     tooltip: {
       trigger: 'axis',
-      backgroundColor: '#222625',
+      backgroundColor: CHART_TOOLTIP_BG,
       borderColor: 'rgba(216,189,132,0.28)',
-      textStyle: { color: '#e2e4e3', fontSize: 11 },
+      textStyle: { color: CHART_TOOLTIP_TEXT, fontSize: 11 },
       formatter: (params: Array<{ seriesName: string; data: [number, number] }>) => {
         const pulls = params[0]?.data[0] ?? 0;
         return [`未来 ${pulls} 抽`, ...params.map((item) => `${item.seriesName} <b>${item.data[1].toFixed(1)}%</b>`)].join('<br/>');
@@ -340,7 +374,7 @@ function buildForecastOption(forecast: GachaForecast) {
         smooth: 0.22,
         showSymbol: false,
         data: forecast.points.map((point) => [point.pulls, point.fiveStar * 100]),
-        lineStyle: { color: '#d8bd84', width: 2.2, shadowBlur: 7, shadowColor: 'rgba(216,189,132,0.3)' },
+        lineStyle: { color: CHART_GOLD, width: 2.2, shadowBlur: 7, shadowColor: 'rgba(216,189,132,0.3)' },
         areaStyle: { color: 'rgba(216,189,132,0.055)' },
         z: 3,
       },
@@ -350,7 +384,7 @@ function buildForecastOption(forecast: GachaForecast) {
         smooth: 0.22,
         showSymbol: false,
         data: forecast.points.map((point) => [point.pulls, (point.featured ?? 0) * 100]),
-        lineStyle: { color: '#79b9ad', width: 1.8 },
+        lineStyle: { color: CHART_OK_DIM, width: 1.8 },
         areaStyle: { color: 'rgba(121,185,173,0.035)' },
         z: 2,
       }] : []),
@@ -369,9 +403,9 @@ function buildFeaturedDistributionOption(bins: PityDistributionBin[]) {
     tooltip: {
       trigger: 'axis',
       axisPointer: { type: 'line', lineStyle: { color: 'rgba(216,189,132,0.32)' } },
-      backgroundColor: '#222625',
+      backgroundColor: CHART_TOOLTIP_BG,
       borderColor: 'rgba(216,189,132,0.28)',
-      textStyle: { color: '#e2e4e3', fontSize: 11 },
+      textStyle: { color: CHART_TOOLTIP_TEXT, fontSize: 11 },
       formatter: (params: Array<{ dataIndex: number }>) => {
         const bin = bins[params[0]?.dataIndex ?? 0];
         return `${bin.label} 抽<br/><b>${bin.count}</b> 次拿到 UP · ${bin.percentage.toFixed(1)}%`;
@@ -406,8 +440,8 @@ function buildFeaturedDistributionOption(bins: PityDistributionBin[]) {
           color: {
             type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
             colorStops: [
-              { offset: 0, color: '#d8bd84' },
-              { offset: 0.42, color: '#79b9ad' },
+              { offset: 0, color: CHART_GOLD },
+              { offset: 0.42, color: CHART_OK_DIM },
               { offset: 1, color: 'rgba(92,137,129,0.12)' },
             ],
           },
@@ -426,13 +460,13 @@ function buildFeaturedDistributionOption(bins: PityDistributionBin[]) {
         showSymbol: true,
         symbol: 'circle',
         symbolSize: 5,
-        lineStyle: { color: '#e1c98f', width: 1.4, shadowBlur: 6, shadowColor: 'rgba(216,189,132,0.35)' },
-        itemStyle: { color: '#e1c98f', borderColor: '#292c2a', borderWidth: 2 },
+        lineStyle: { color: CHART_GOLD_SOFT, width: 1.4, shadowBlur: 6, shadowColor: 'rgba(216,189,132,0.35)' },
+        itemStyle: { color: CHART_GOLD_SOFT, borderColor: '#292c2a', borderWidth: 2 },
         areaStyle: { color: 'rgba(216,189,132,0.055)' },
         markLine: {
           silent: true,
           symbol: 'none',
-          label: { formatter: '理论期望 81.15', color: '#d8bd84', fontSize: 10, position: 'insideEndTop' },
+          label: { formatter: '理论期望 81.15', color: CHART_GOLD, fontSize: 10, position: 'insideEndTop' },
           lineStyle: { color: 'rgba(216,189,132,0.72)', type: 'dashed', width: 1 },
           data: [{ xAxis: labels[expectedIndex] }],
         },
@@ -458,6 +492,9 @@ export default function AnalyticsPage() {
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [distributionDetail, setDistributionDetail] = useState<{ kind: 'five-star' | 'featured'; bin: PityDistributionBin } | null>(null);
+  // 请求态按 key 记录，避免上一把筛选的 loading/错误串到当前筛选上。
+  const [requestState, setRequestState] = useState<{ key: string; status: 'loading' | 'error' } | null>(null);
+  const [retryNonce, setRetryNonce] = useState(0);
   const poolNavRef = useRef<HTMLElement>(null);
   const [poolIndicator, setPoolIndicator] = useState({ top: 0, height: 0, visible: false });
 
@@ -466,26 +503,36 @@ export default function AnalyticsPage() {
     : null;
   const cachedInsights = insightsKey ? analyticsCache.get(insightsKey) ?? null : null;
   const visibleInsights = cachedInsights ?? (insights?.key === insightsKey ? insights.data : null);
+  const insightsLoading = insightsKey !== null && visibleInsights === null
+    && requestState?.key === insightsKey && requestState.status === 'loading';
+  const insightsFailed = insightsKey !== null && visibleInsights === null
+    && requestState?.key === insightsKey && requestState.status === 'error';
 
   useEffect(() => {
     if (!activePlayerId) {
       setInsights(null);
+      setRequestState(null);
       return;
     }
     let current = true;
     if (dateMode === 'custom' && (!startDate || !endDate || startDate > endDate)) {
       setInsights(null);
+      setRequestState(null);
       return;
     }
     const key = `${activePlayerId}|${includeMock ? 'mock' : 'official'}|${dateMode}|${startDate}|${endDate}|${analyticsRevision}`;
     const cached = analyticsCache.get(key);
     if (cached) {
       setInsights({ key, data: cached });
+      setRequestState(null);
       setActivePoolType((previous) => cached.pools.some((pool) => pool.pool_type === previous)
         ? previous
         : cached.pools.find((pool) => pool.complete_interval_count > 0)?.pool_type ?? cached.pools[0]?.pool_type ?? null);
       return;
     }
+    // 请求期间必须有明确的 loading 态：否则 activePool 为 null 会落到
+    // 「当前范围没有可分析记录」的空态上，每次切玩家/改日期都先闪一次错误结论。
+    setRequestState({ key, status: 'loading' });
     gachaApi.getGachaInsights(
       activePlayerId,
       includeMock,
@@ -494,15 +541,20 @@ export default function AnalyticsPage() {
     )
       .then((result) => {
         if (!current) return;
-        analyticsCache.set(key, result);
+        rememberInsights(key, result);
         setInsights({ key, data: result });
+        setRequestState(null);
         setActivePoolType((previous) => result.pools.some((pool) => pool.pool_type === previous)
           ? previous
           : result.pools.find((pool) => pool.complete_interval_count > 0)?.pool_type ?? result.pools[0]?.pool_type ?? null);
       })
-      .catch(() => { if (current) setInsights(null); });
+      .catch(() => {
+        if (!current) return;
+        setInsights(null);
+        setRequestState({ key, status: 'error' });
+      });
     return () => { current = false; };
-  }, [activePlayerId, activeRecordCount, analyticsRevision, dateMode, endDate, includeMock, startDate]);
+  }, [activePlayerId, activeRecordCount, analyticsRevision, dateMode, endDate, includeMock, retryNonce, startDate]);
 
   const setAnalysisDateMode = (mode: 'all' | 'custom') => {
     setDateMode(mode);
@@ -536,6 +588,7 @@ export default function AnalyticsPage() {
       ?? null,
     [activePoolType, visibleInsights],
   );
+  const reliability = activePool ? RELIABILITY[activePool.reliability] : RELIABILITY.insufficient;
   const activeHardPity = activePool?.pool_type === '5' ? 50 : 80;
   const distributionOption = useMemo(
     () => activePool ? buildHistogramOption(activePool.distribution, 80, FIVE_STAR_EXPECTED_PULLS, '理论期望 54.1', '出金') : null,
@@ -620,10 +673,10 @@ export default function AnalyticsPage() {
   const observedSignal = observedDelta === null || !hasTrendSample
     ? { label: '样本不足', tone: '#8b938e' }
     : observedDelta <= -12
-      ? { label: '偏欧', tone: '#8fc8be' }
+      ? { label: '偏欧', tone: CHART_OK }
       : observedDelta >= 12
-        ? { label: '偏非', tone: '#d99a9a' }
-        : { label: '接近理论', tone: '#d8bd84' };
+        ? { label: '偏非', tone: CHART_DANGER }
+        : { label: '接近理论', tone: CHART_GOLD };
 
   return (
     <>
@@ -654,7 +707,7 @@ export default function AnalyticsPage() {
                 <div className="mt-2 space-y-1.5">
                   <ThemedDateInput value={startDate} min={activeSummary?.earliest_time.slice(0, 10)} max={endDate || activeSummary?.latest_time.slice(0, 10)} onChange={setStartDate} label="分析开始日期" />
                   <ThemedDateInput value={endDate} min={startDate || activeSummary?.earliest_time.slice(0, 10)} max={activeSummary?.latest_time.slice(0, 10)} onChange={setEndDate} label="分析结束日期" />
-                  <small className={startDate && endDate && startDate <= endDate ? '' : 'text-[#d99a9a]'}>{startDate && endDate && startDate <= endDate ? '范围首段按不完整历史处理' : '请选择有效日期范围'}</small>
+                  <small className={startDate && endDate && startDate <= endDate ? '' : 'text-danger'}>{startDate && endDate && startDate <= endDate ? '范围首段按不完整历史处理' : '请选择有效日期范围'}</small>
                 </div>
               ) : null}
             </div>
@@ -698,6 +751,23 @@ export default function AnalyticsPage() {
                 <ResonanceEmptyState variant="filter" title="请选择有效日期范围" description="调整开始和结束日期，或切换回全部时间" />
               ) : !activePlayerId && initialized ? (
                 <ResonanceEmptyState variant="records" title="暂无可分析记录" description="完成一次扫描或导入后，这里会显示历史出金表现" />
+              ) : insightsLoading ? (
+                <div className="analysis-loading-state" aria-busy="true" aria-label="正在统计分析数据">
+                  <div className="analysis-loading-line analysis-loading-line-wide" />
+                  <div className="analysis-loading-line analysis-loading-line-medium" />
+                  <div className="analysis-loading-grid"><span /><span /></div>
+                </div>
+              ) : insightsFailed ? (
+                <div className="flex flex-1 flex-col items-center justify-center gap-3">
+                  <div className="text-sm text-danger">统计数据读取失败</div>
+                  <button
+                    type="button"
+                    onClick={() => setRetryNonce((value) => value + 1)}
+                    className="flex items-center gap-2 rounded-md border border-white/[0.08] px-3 py-2 text-xs text-wave hover:text-tide"
+                  >
+                    <ResonanceIcon kind="refresh" size={14} />重新统计
+                  </button>
+                </div>
               ) : activePool ? (
                 <motion.div key={`${activePool.pool_type}-${includeMock}`} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className="space-y-4 pb-7">
                   <section className="analysis-pool-overview">
@@ -715,12 +785,17 @@ export default function AnalyticsPage() {
                         <small>/ {activeHardPity} 抽</small>
                       </div> : <div className="analysis-current-pity"><span>分析范围</span><strong className="!text-base">自定义</strong><small>{startDate} 至 {endDate}</small></div>}
                     </div>
+                    <div className="analysis-method-note">
+                      <ResonanceIcon kind="traces" size={15} />
+                      <span>每次五星后重新从第 1 抽计数。未确认历史起点时首个可见五星不参与平均；当前垫抽尚未出金，始终不参与平均。</span>
+                      <em style={{ color: reliability.tone }}>{reliability.label}</em>
+                    </div>
                     <div className="analysis-metric-grid">
                         <Metric label="五星获取数量" value={`${activePool.five_star_count} 个`} />
-                        <Metric label="平均多少抽出金" value={formatPull(activePool.average_pity)} tone="#d8bd84" />
+                        <Metric label="平均多少抽出金" value={formatPull(activePool.average_pity)} tone={CHART_GOLD} />
                       <Metric label="一半在多少抽内" value={formatPull(activePool.median_pity)} />
-                      <Metric label="最快出金" value={formatPull(activePool.best_pity)} tone="#bfc4c0" />
-                      <Metric label="最慢出金" value={formatPull(activePool.worst_pity)} tone="#d99a9a" />
+                      <Metric label="最快出金" value={formatPull(activePool.best_pity)} tone={CHART_NEUTRAL} />
+                      <Metric label="最慢出金" value={formatPull(activePool.worst_pity)} tone={CHART_DANGER} />
                       <Metric label="40 抽内出金" value={`${activePool.early_rate.toFixed(1)}%`} />
                     </div>
                   </section>
@@ -746,11 +821,8 @@ export default function AnalyticsPage() {
                       <div className="analysis-forecast-heading">
                         <div>
                           <span className="analysis-section-index">CONDITIONAL FORECAST / PITY {activePool.current_pity}</span>
-                          <h2 className="flex items-center gap-2">从当前垫抽开始，未来有多大概率出金
-                            <Tooltip content={<span className="max-w-[280px] whitespace-normal">已将前 {activePool.current_pity} 抽未出五星作为已知条件，从下一抽重新计算；规则模型采用已确认的分段软保底，个人校准仅反映你的历史表现。</span>} contentClassName="whitespace-normal max-w-[300px]">
-                              <span className="inline-flex h-[16px] w-[16px] shrink-0 cursor-help items-center justify-center rounded-full border border-dashed border-[#c9ab78]/40 text-[#c9ab78]/70 transition-colors hover:border-[#c9ab78]/70 hover:text-[#c9ab78]"><ResonanceIcon kind="info" size={10} /></span>
-                            </Tooltip>
-                          </h2>
+                          <h2>从当前垫抽开始，未来有多大概率出金</h2>
+                          <p>已将前 {activePool.current_pity} 抽未出五星作为已知条件，从下一抽重新计算；规则模型采用已确认的分段软保底，个人校准仅反映你的历史表现。</p>
                         </div>
                         <div className="analysis-model-tools">
                           <div className="analysis-model-control" aria-label="概率预测模型">
@@ -777,7 +849,12 @@ export default function AnalyticsPage() {
                             <span><i data-tone="gold" />至少一个五星</span>
                             {LIMITED_ROLE_POOL_TYPES.has(activePool.pool_type) ? <span><i data-tone="cyan" />获得当期 UP</span> : null}
                           </div>
-                          <AnalyticsChart option={forecastOption} height={270} eager />
+                          <AnalyticsChart
+                            option={forecastOption}
+                            height={270}
+                            eager
+                            ariaLabel={`从当前垫抽 ${activePool.current_pity} 抽开始的条件概率曲线：未来 10 抽内至少出一个五星的概率 ${((forecastNextTen?.fiveStar ?? 0) * 100).toFixed(1)}%，获得下一个五星的条件期望 ${forecast.expectedFiveStar.toFixed(1)} 抽。`}
+                          />
                         </div>
                         <aside className="analysis-forecast-summary">
                           <div className="analysis-forecast-now">
@@ -812,11 +889,8 @@ export default function AnalyticsPage() {
                         <div className="flex flex-wrap items-end justify-between gap-4">
                           <div>
                             <span className="analysis-section-index">PULL PLANNER</span>
-                            <h3 className="mt-1 flex items-center gap-2 text-sm font-medium text-tide">计划追加多少抽
-                              <Tooltip content="沿用上方同一条条件概率曲线，不改变当前记录或保底状态" contentClassName="whitespace-normal max-w-[240px]">
-                                <span className="inline-flex h-[15px] w-[15px] shrink-0 cursor-help items-center justify-center rounded-full border border-dashed border-[#c9ab78]/40 text-[#c9ab78]/70 transition-colors hover:border-[#c9ab78]/70 hover:text-[#c9ab78]"><ResonanceIcon kind="info" size={9} /></span>
-                              </Tooltip>
-                            </h3>
+                            <h3 className="mt-1 text-sm font-medium text-tide">计划追加多少抽</h3>
+                            <p className="mt-1 text-[10px] text-wave">沿用上方同一条条件概率曲线，不改变当前记录或保底状态。</p>
                           </div>
                           <label className="flex items-center gap-2 text-xs text-wave">
                             追加
@@ -831,12 +905,12 @@ export default function AnalyticsPage() {
                             抽
                           </label>
                         </div>
-                        <input type="range" min={0} max={maxPlannedPulls} value={safePlannedPulls} onChange={(event) => setPlannedPulls(Number(event.target.value))} className="mt-4 w-full accent-[#d8bd84]" aria-label="计划追加抽数" />
+                        <input type="range" min={0} max={maxPlannedPulls} value={safePlannedPulls} onChange={(event) => setPlannedPulls(Number(event.target.value))} className="mt-4 w-full accent-gold-bright" aria-label="计划追加抽数" />
                         <div className={`mt-3 grid grid-cols-2 gap-px overflow-hidden rounded-md border border-white/[0.06] bg-white/[0.06] ${LIMITED_ROLE_POOL_TYPES.has(activePool.pool_type) ? 'md:grid-cols-4' : 'md:grid-cols-2'}`}>
-                          <div className="bg-[#252625] px-3 py-3"><span className="text-[10px] text-wave">至少一个五星</span><strong className="mt-1 block text-lg tabular-nums text-[#d8bd84]">{((plannedPoint?.fiveStar ?? 0) * 100).toFixed(1)}%</strong></div>
-                          {LIMITED_ROLE_POOL_TYPES.has(activePool.pool_type) ? <div className="bg-[#252625] px-3 py-3"><span className="text-[10px] text-wave">获得当期 UP</span><strong className="mt-1 block text-lg tabular-nums text-[#8fc8be]">{plannedPoint?.featured === null || plannedPoint?.featured === undefined ? '-' : `${(plannedPoint.featured * 100).toFixed(1)}%`}</strong></div> : null}
-                          <div className="bg-[#252625] px-3 py-3"><span className="text-[10px] text-wave">五星最坏还需</span><strong className="mt-1 block text-lg tabular-nums text-tide">{worstFiveStarPulls} 抽</strong></div>
-                          {LIMITED_ROLE_POOL_TYPES.has(activePool.pool_type) ? <div className="bg-[#252625] px-3 py-3"><span className="text-[10px] text-wave">UP 最坏还需</span><strong className="mt-1 block text-lg tabular-nums text-tide">{maxPlannedPulls} 抽</strong></div> : null}
+                          <div className="bg-abyss-50 px-3 py-3"><span className="text-[10px] text-wave">至少一个五星</span><strong className="mt-1 block text-lg tabular-nums text-gold-bright">{((plannedPoint?.fiveStar ?? 0) * 100).toFixed(1)}%</strong></div>
+                          {LIMITED_ROLE_POOL_TYPES.has(activePool.pool_type) ? <div className="bg-abyss-50 px-3 py-3"><span className="text-[10px] text-wave">获得当期 UP</span><strong className="mt-1 block text-lg tabular-nums text-ok">{plannedPoint?.featured === null || plannedPoint?.featured === undefined ? '-' : `${(plannedPoint.featured * 100).toFixed(1)}%`}</strong></div> : null}
+                          <div className="bg-abyss-50 px-3 py-3"><span className="text-[10px] text-wave">五星最坏还需</span><strong className="mt-1 block text-lg tabular-nums text-tide">{worstFiveStarPulls} 抽</strong></div>
+                          {LIMITED_ROLE_POOL_TYPES.has(activePool.pool_type) ? <div className="bg-abyss-50 px-3 py-3"><span className="text-[10px] text-wave">UP 最坏还需</span><strong className="mt-1 block text-lg tabular-nums text-tide">{maxPlannedPulls} 抽</strong></div> : null}
                         </div>
                       </div>
                     </section>
@@ -859,25 +933,30 @@ export default function AnalyticsPage() {
                     <div className="analysis-chart-grid">
                       <section className="analysis-chart-panel">
                         <div className="analysis-chart-heading">
-                          <div><span>HISTOGRAM / 1–80</span><h3 className="flex items-center gap-1.5">每次五星用了多少抽
-                            <Tooltip content="柱越高，说明该抽数范围内出金越常见；点击柱子可查看对应五星" contentClassName="whitespace-normal max-w-[240px]">
-                              <span className="inline-flex h-[15px] w-[15px] shrink-0 cursor-help items-center justify-center rounded-full border border-dashed border-wave/30 text-wave/60 transition-colors hover:border-tide/50 hover:text-tide"><ResonanceIcon kind="info" size={9} /></span>
-                            </Tooltip>
-                          </h3></div>
+                          <div><span>HISTOGRAM / 1–80</span><h3>每次五星用了多少抽</h3></div>
+                          <p>柱越高，说明该抽数范围内出金越常见；点击柱子可查看对应五星</p>
                         </div>
-                        <AnalyticsChart option={distributionOption} height={292} prewarmDelay={120} onEvents={histogramEvents} />
+                        <AnalyticsChart
+                          option={distributionOption}
+                          height={292}
+                          prewarmDelay={120}
+                          onEvents={histogramEvents}
+                          ariaLabel={`${activePool.pool_name} 五星抽数分布直方图：共 ${activePool.five_star_count} 个五星，平均 ${formatPull(activePool.average_pity)}，最快 ${formatPull(activePool.best_pity)}，最慢 ${formatPull(activePool.worst_pity)}。`}
+                        />
                       </section>
                       <section className="analysis-chart-panel">
                         <div className="analysis-chart-heading">
-                          <div><span>CONDITIONAL RATE / 1–80</span><h3 className="flex items-center gap-1.5">第 N 抽实际有多容易出金
-                            <Tooltip content={activePool.pool_type === '5'
-                              ? '新手池只展示历史出金率；逐抽规则未确认，不套用普通池模型'
-                              : '规则模型作为基线，历史样本按有效样本量收缩到个人校准曲线；历史线仅供观察，不改变保底规则'} contentClassName="whitespace-normal max-w-[260px]">
-                              <span className="inline-flex h-[15px] w-[15px] shrink-0 cursor-help items-center justify-center rounded-full border border-dashed border-wave/30 text-wave/60 transition-colors hover:border-tide/50 hover:text-tide"><ResonanceIcon kind="info" size={9} /></span>
-                            </Tooltip>
-                          </h3></div>
+                          <div><span>CONDITIONAL RATE / 1–80</span><h3>第 N 抽实际有多容易出金</h3></div>
+                          <p>{activePool.pool_type === '5'
+                            ? '新手池只展示历史出金率；逐抽规则未确认，不套用普通池模型。'
+                            : '规则模型作为基线，历史样本按有效样本量收缩到个人校准曲线；历史线仅供观察，不改变保底规则。'}</p>
                         </div>
-                        <AnalyticsChart option={probabilityOption} height={292} prewarmDelay={240} />
+                        <AnalyticsChart
+                          option={probabilityOption}
+                          height={292}
+                          prewarmDelay={240}
+                          ariaLabel={`${activePool.pool_name} 逐抽出金率曲线：规则模型为分段软保底，1 至 65 抽 0.8%，79 抽必出；个人校准倍率 ${personalCalibration.factor.toFixed(3)}。`}
+                        />
                       </section>
                     </div>
                   ) : (
@@ -889,31 +968,31 @@ export default function AnalyticsPage() {
                       <div className="analysis-featured-heading">
                         <div>
                           <span className="analysis-section-index">FEATURED RESONANCE / 1–160</span>
-                          <h2 className="flex items-center gap-2">抽到一个 UP 角色实际用了多少抽
-                            <Tooltip content={<span className="max-w-[300px] whitespace-normal">从上一个 UP 五星之后开始计数，到下一个 UP 五星为止；中间如果歪了，会把歪五星前后的抽数合并。不歪率 {activePool.featured_win_rate === null ? '-' : `${activePool.featured_win_rate.toFixed(1)}%`}（{activePool.featured_win_count}/{activePool.featured_attempt_count}，大保底 UP 不计入）。</span>} contentClassName="whitespace-normal max-w-[320px]">
-                              <span className="inline-flex h-[16px] w-[16px] shrink-0 cursor-help items-center justify-center rounded-full border border-dashed border-[#c9ab78]/40 text-[#c9ab78]/70 transition-colors hover:border-[#c9ab78]/70 hover:text-[#c9ab78]"><ResonanceIcon kind="info" size={10} /></span>
-                            </Tooltip>
-                          </h2>
+                          <h2>抽到一个 UP 角色实际用了多少抽</h2>
+                          <p>从上一个 UP 五星之后开始计数，到下一个 UP 五星为止；中间如果歪了，会把歪五星前后的抽数合并。不歪率 {activePool.featured_win_rate === null ? '-' : `${activePool.featured_win_rate.toFixed(1)}%`}（{activePool.featured_win_count}/{activePool.featured_attempt_count}，大保底 UP 不计入）。</p>
                         </div>
                         <div className="analysis-featured-expect"><span>理论期望</span><strong>81.15</strong><small>抽</small></div>
                       </div>
                       <div className="analysis-featured-metrics">
                         <Metric label="统计 UP 获取" value={`${activePool.featured_cycle_count} 次`} />
-                        <Metric label="平均拿到 UP" value={formatPull(activePool.featured_average_pulls)} tone="#d8bd84" />
+                        <Metric label="平均拿到 UP" value={formatPull(activePool.featured_average_pulls)} tone={CHART_GOLD} />
                         <Metric label="一半在多少抽内" value={formatPull(activePool.featured_median_pulls)} />
-                        <Metric label="不歪率" value={activePool.featured_win_rate === null ? '-' : `${activePool.featured_win_rate.toFixed(1)}%`} tone="#bfc4c0" />
+                        <Metric label="不歪率" value={activePool.featured_win_rate === null ? '-' : `${activePool.featured_win_rate.toFixed(1)}%`} tone={CHART_NEUTRAL} />
                         <Metric label="最快拿到 UP" value={formatPull(activePool.featured_best_pulls)} />
-                        <Metric label="最慢拿到 UP" value={formatPull(activePool.featured_worst_pulls)} tone="#d99a9a" />
+                        <Metric label="最慢拿到 UP" value={formatPull(activePool.featured_worst_pulls)} tone={CHART_DANGER} />
                       </div>
                       <div className="analysis-featured-chart">
                         <div className="analysis-chart-heading">
-                          <div><span>HISTOGRAM / 1–160</span><h3 className="flex items-center gap-1.5">UP 角色获取成本分布
-                            <Tooltip content="金色虚线：长期理论期望 81.15 抽；点击柱子查看每次 UP、前置歪与分段抽数" contentClassName="whitespace-normal max-w-[260px]">
-                              <span className="inline-flex h-[15px] w-[15px] shrink-0 cursor-help items-center justify-center rounded-full border border-dashed border-wave/30 text-wave/60 transition-colors hover:border-tide/50 hover:text-tide"><ResonanceIcon kind="info" size={9} /></span>
-                            </Tooltip>
-                          </h3></div>
+                          <div><span>HISTOGRAM / 1–160</span><h3>UP 角色获取成本分布</h3></div>
+                          <p>金色虚线：长期理论期望 81.15 抽；点击柱子查看每次 UP、前置歪与分段抽数</p>
                         </div>
-                        <AnalyticsChart option={featuredOption} height={320} prewarmDelay={360} onEvents={featuredHistogramEvents} />
+                        <AnalyticsChart
+                          option={featuredOption}
+                          height={320}
+                          prewarmDelay={360}
+                          onEvents={featuredHistogramEvents}
+                          ariaLabel={`${activePool.pool_name} UP 获取成本分布：统计 ${activePool.featured_cycle_count} 次 UP 获取，平均 ${formatPull(activePool.featured_average_pulls)}，理论期望 81.15 抽。`}
+                        />
                       </div>
                     </section>
                   ) : null}

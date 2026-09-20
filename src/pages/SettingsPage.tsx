@@ -40,9 +40,24 @@ import type {
 type DeleteTarget = { playerId: string | null };
 type ExportTarget = { playerId: string; earliestDate: string; latestDate: string };
 type BoundaryNavigationState = { boundaryPlayerId?: string; boundaryPoolType?: string };
+/**
+ * 云同步冲突。后端在两种情况下拒绝自动同步：首次连接时两端都已有数据，
+ * 或两端相对上次基线都发生了变化。两种都只能由用户指定保留哪一端。
+ */
+type SyncConflict = { playerId: string; kind: 'first-connect' | 'both-changed' };
 
 // Directory checks are stable for the lifetime of the app. Keep them across route remounts.
 const gameDirValidationCache = new Map<string, GameDirValidation>();
+
+/*
+ * 资源包状态轮询节奏。
+ *
+ * 下载中需要高频刷新才能让进度条走得顺；但绝大多数时间资源包是装好且不变的，
+ * 原先无条件每 500ms 调一次 Tauri command，只要停在设置页就一直空转。
+ * 这里改成按是否在下载切换节奏，并在窗口不可见时完全停下。
+ */
+const RESOURCE_PACK_POLL_ACTIVE_MS = 500;
+const RESOURCE_PACK_POLL_IDLE_MS = 5000;
 
 // 去除 release notes 末尾由模板自动生成的下载提示和自动生成标记
 // 这些内容在 GitHub Release 页面有意义，但出现在更新弹窗中不合适
@@ -185,11 +200,16 @@ export default function SettingsPage() {
   const [appVersion, setAppVersion] = useState('');
   const [resourcePack, setResourcePack] = useState<ResourcePackStatus | null>(null);
   const [resourcePackBusy, setResourcePackBusy] = useState(false);
+  // 供轮询循环同步读取：用户刚点下载时立刻切到高频，不必等下一轮状态回包。
+  const resourcePackBusyRef = useRef(false);
+  const pokeResourcePackPollRef = useRef<() => void>(() => {});
   const [oneDriveStatus, setOneDriveStatus] = useState<OneDriveStatus | null>(null);
   const [oneDriveLogin, setOneDriveLogin] = useState<OneDriveDeviceLogin | null>(null);
   const [oneDriveBusy, setOneDriveBusy] = useState(false);
   const [syncingUid, setSyncingUid] = useState<string | null>(null);
   const [oneDriveResult, setOneDriveResult] = useState<Record<string, OneDriveSyncResult>>({});
+  const [syncConflict, setSyncConflict] = useState<SyncConflict | null>(null);
+  const [disconnectConfirming, setDisconnectConfirming] = useState(false);
   const cloudSyncStatus = useGachaStore((state) => state.cloudSyncStatus);
   const { enabled: soundEnabled, setEnabled: setSoundEnabled } = useUiFeedback();
 
@@ -204,20 +224,45 @@ export default function SettingsPage() {
   useEffect(() => {
     let cancelled = false;
     let timer: number | null = null;
+
+    const schedule = (delay: number) => {
+      if (cancelled) return;
+      timer = window.setTimeout(() => void refreshStatus(), delay);
+    };
+
     const refreshStatus = async () => {
+      if (cancelled) return;
+      // 窗口不可见时不发请求，交给 visibilitychange 唤醒后立刻补一次。
+      if (document.visibilityState === 'hidden') {
+        schedule(RESOURCE_PACK_POLL_IDLE_MS);
+        return;
+      }
+      let downloading = resourcePackBusyRef.current;
       try {
         const status = await gachaApi.getResourcePackStatus();
-        if (!cancelled) setResourcePack(status);
+        if (cancelled) return;
+        setResourcePack(status);
+        downloading = downloading || status.in_progress === true;
       } catch {
         // Browser preview and app shutdown can make the command unavailable.
-      } finally {
-        if (!cancelled) timer = window.setTimeout(refreshStatus, 500);
       }
+      schedule(downloading ? RESOURCE_PACK_POLL_ACTIVE_MS : RESOURCE_PACK_POLL_IDLE_MS);
     };
+
+    const poke = () => {
+      if (cancelled || document.visibilityState === 'hidden') return;
+      if (timer !== null) window.clearTimeout(timer);
+      void refreshStatus();
+    };
+    pokeResourcePackPollRef.current = poke;
+
     void refreshStatus();
+    document.addEventListener('visibilitychange', poke);
     return () => {
       cancelled = true;
       if (timer !== null) window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', poke);
+      pokeResourcePackPollRef.current = () => {};
     };
   }, []);
 
@@ -781,6 +826,9 @@ export default function SettingsPage() {
   const handleRefreshResourcePack = async () => {
     if (resourcePackBusy || resourcePack?.in_progress) return;
     setResourcePackBusy(true);
+    resourcePackBusyRef.current = true;
+    // 立刻拉起一次高频轮询，让进度条从按下的那一刻就开始动。
+    pokeResourcePackPollRef.current();
     try {
       const status = await gachaApi.refreshResourcePack();
       setResourcePack(status);
@@ -795,6 +843,7 @@ export default function SettingsPage() {
       addToast('error', `资源包下载失败：${message}`);
     } finally {
       setResourcePackBusy(false);
+      resourcePackBusyRef.current = false;
     }
   };
 
@@ -842,11 +891,39 @@ export default function SettingsPage() {
         connected: false,
         login_pending: false
       }));
+      setDisconnectConfirming(false);
       addToast('success', '已断开 OneDrive');
     } catch (error) {
       addToast('error', String(error));
     } finally {
       setOneDriveBusy(false);
+    }
+  };
+
+  /**
+   * 用户在冲突弹窗里明确选择保留哪一端后重试同步。
+   *
+   * 两个方向都是整库覆盖，其中 'remote' 会用云端快照替换本机数据库，
+   * 且这条路径不会像删除记录那样自动留备份——弹窗必须把这点说清楚。
+   */
+  const resolveSyncConflict = async (strategy: 'local' | 'remote') => {
+    if (!syncConflict) return;
+    const { playerId } = syncConflict;
+    setSyncConflict(null);
+    setSyncingUid(playerId);
+    useGachaStore.getState().setCloudSyncStatus('checking', '正在同步云端');
+    try {
+      const result = await gachaApi.syncOneDriveDatabase(playerId, strategy);
+      setOneDriveResult((current) => ({ ...current, [playerId]: result }));
+      await Promise.all([fetchSummaries(), useGachaStore.getState().fetchRecords(), useGachaStore.getState().fetchStats(playerId)]);
+      useGachaStore.getState().scheduleCloudSync();
+      addToast('success', strategy === 'local' ? '已使用本机数据覆盖云端' : '已使用云端数据覆盖本机');
+      useGachaStore.getState().setCloudSyncStatus('current', '云端已是最新');
+    } catch (retryError) {
+      addToast('error', String(retryError));
+      useGachaStore.getState().setCloudSyncStatus('error', '云端同步失败');
+    } finally {
+      setSyncingUid(null);
     }
   };
 
@@ -862,18 +939,10 @@ export default function SettingsPage() {
     } catch (error) {
       const message = String(error);
       if (message.includes('首次连接') || message.includes('都已发生变化')) {
-        const keepLocal = window.confirm('本机和云端数据都已变化。确定使用本机数据覆盖云端吗？\n\n点击“取消”可继续选择使用云端数据。');
-        let strategy: 'local' | 'remote' | undefined = keepLocal ? 'local' : undefined;
-        if (!keepLocal && window.confirm('是否使用云端数据覆盖本机？')) strategy = 'remote';
-        if (strategy) {
-          try {
-            const result = await gachaApi.syncOneDriveDatabase(playerId, strategy);
-            setOneDriveResult((current) => ({ ...current, [playerId]: result }));
-            await Promise.all([fetchSummaries(), useGachaStore.getState().fetchRecords(), useGachaStore.getState().fetchStats(playerId)]);
-            useGachaStore.getState().scheduleCloudSync();
-            addToast('success', strategy === 'local' ? '已使用本机数据覆盖云端' : '已使用云端数据覆盖本机');
-          } catch (retryError) { addToast('error', String(retryError)); }
-        } else addToast('info', '已取消同步，数据未改变');
+        // 覆盖整个数据库是本页风险最高的操作，交给专门的确认弹窗说明影响范围，
+        // 而不是用两次原生 confirm 让用户猜「取消」之后会发生什么。
+        setSyncConflict({ playerId, kind: message.includes('首次连接') ? 'first-connect' : 'both-changed' });
+        useGachaStore.getState().setCloudSyncStatus('error', '云端同步存在冲突');
       } else {
         addToast('error', message);
         useGachaStore.getState().setCloudSyncStatus('error', '云端同步失败');
@@ -1174,7 +1243,7 @@ export default function SettingsPage() {
                     </button>
                   </div>
                   {oneDriveStatus?.connected ? (
-                    <button type="button" onClick={() => void handleOneDriveDisconnect()}
+                    <button type="button" onClick={() => setDisconnectConfirming(true)}
                             disabled={oneDriveBusy || syncingUid !== null}
                             className="shrink-0 text-xs text-wave hover:text-tide disabled:opacity-40">断开连接</button>
                   ) : (
@@ -1717,6 +1786,101 @@ export default function SettingsPage() {
               <p className="text-[10px] leading-5 text-wave">确认只影响边界标记与统计口径，不会修改、补造或删除记录；以后导入更早记录时会自动失效。</p>
             </div>
           </>}
+        </Modal>
+
+        <Modal
+          open={disconnectConfirming}
+          onClose={() => { if (!oneDriveBusy) setDisconnectConfirming(false); }}
+          closeDisabled={oneDriveBusy}
+          className="max-w-md border-white/[0.08] bg-surface-modal"
+          labelledBy="onedrive-disconnect-title"
+        >
+          <div className="flex items-start justify-between border-b border-white/[0.06] p-5">
+            <div>
+              <h2 id="onedrive-disconnect-title" className="text-base font-medium text-tide">断开 OneDrive 连接</h2>
+              <p className="mt-1 text-xs text-wave">停止云端同步</p>
+            </div>
+            <ResonanceCloseButton onClick={() => setDisconnectConfirming(false)} disabled={oneDriveBusy} />
+          </div>
+          <div className="space-y-3 p-5 text-xs leading-5 text-wave">
+            <p>断开后本机记录不会有任何改动，云端已有的快照也会保留，只是不再自动上传或拉取。</p>
+            <p>重新连接需要再走一次设备码登录：复制验证码、在浏览器登录并授权。如果只是暂时不想同步，可以直接不点同步按钮，不必断开。</p>
+            <div className="flex justify-end gap-2 pt-1">
+              <button type="button" onClick={() => setDisconnectConfirming(false)} disabled={oneDriveBusy} className="px-4 py-2 text-sm text-wave hover:text-tide disabled:opacity-40">取消</button>
+              <button type="button" onClick={() => void handleOneDriveDisconnect()} disabled={oneDriveBusy} className="tide-btn flex items-center gap-2 px-4 py-2 text-sm disabled:opacity-40">
+                {oneDriveBusy && <LoaderCircle size={12} className="animate-spin" />}
+                确认断开
+              </button>
+            </div>
+          </div>
+        </Modal>
+
+        <Modal
+          open={syncConflict !== null}
+          onClose={() => setSyncConflict(null)}
+          className="max-w-lg border-warn-border/25 bg-surface-modal"
+          labelledBy="sync-conflict-title"
+        >
+          {syncConflict && (() => {
+            const conflictSummary = summaryByPlayer.get(syncConflict.playerId);
+            return <>
+              <div className="flex items-start justify-between border-b border-white/[0.06] p-5">
+                <div className="min-w-0">
+                  <h2 id="sync-conflict-title" className="text-base font-medium text-tide">
+                    {syncConflict.kind === 'first-connect' ? '首次连接：两端都已有数据' : '本机与云端都有改动'}
+                  </h2>
+                  <p className="mt-1 text-xs text-wave">UID {displayUid(syncConflict.playerId)} · 需要你指定保留哪一端</p>
+                </div>
+                <ResonanceCloseButton onClick={() => setSyncConflict(null)} />
+              </div>
+              <div className="space-y-4 p-5 text-xs leading-5 text-wave">
+                <p>
+                  {syncConflict.kind === 'first-connect'
+                    ? '这台设备还没有和云端对齐过基线，无法判断哪一份更完整，因此没有自动同步。'
+                    : '自上次成功同步以来，本机数据库和云端快照都发生了变化。自动合并会丢掉一端的改动，因此已停在这里。'}
+                </p>
+
+                <div className="rounded-md border border-white/[0.07] bg-white/[0.02] px-3 py-3">
+                  <div className="text-[11px] text-tide">本机现有数据</div>
+                  {conflictSummary ? (
+                    <div className="mt-1.5 space-y-0.5 text-[11px]">
+                      <div>记录数量：<span className="tabular-nums text-tide">{conflictSummary.record_count.toLocaleString()}</span> 条</div>
+                      <div>时间范围：<span className="tabular-nums text-tide">{conflictSummary.earliest_time.slice(0, 10)}</span> 至 <span className="tabular-nums text-tide">{conflictSummary.latest_time.slice(0, 10)}</span></div>
+                    </div>
+                  ) : (
+                    <div className="mt-1.5 text-[11px]">尚未读到该 UID 的本机数据摘要。</div>
+                  )}
+                  <div className="mt-2 text-[10px] leading-4 text-wave/80">云端快照的条数和范围需要下载后才能得知，这里不做猜测。如果不确定，建议先取消，用下方「导出」把本机记录存一份再决定。</div>
+                </div>
+
+                <div className="space-y-2">
+                  <button
+                    type="button"
+                    onClick={() => void resolveSyncConflict('local')}
+                    className="w-full rounded-md border border-white/[0.08] bg-white/[0.02] px-3 py-3 text-left transition-colors hover:border-ok/30 hover:bg-ok/[0.05]"
+                  >
+                    <span className="block text-xs font-medium text-tide">用本机数据覆盖云端</span>
+                    <span className="mt-1 block text-[11px] leading-5">上传本机数据库快照，替换云端。本机记录不变；云端上只存在于另一台设备的改动会丢失。</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void resolveSyncConflict('remote')}
+                    className="w-full rounded-md border border-danger-strong/25 bg-danger-strong/[0.05] px-3 py-3 text-left transition-colors hover:border-danger-strong/40 hover:bg-danger-strong/[0.09]"
+                  >
+                    <span className="block text-xs font-medium text-danger">用云端数据覆盖本机</span>
+                    <span className="mt-1 block text-[11px] leading-5">
+                      下载云端快照并替换本机数据库。本机上尚未上传的记录、模拟记录和历史起点确认都会被替换掉，
+                      <b className="text-danger">这条路径不会自动创建备份</b>，请先确认已导出需要保留的数据。
+                    </span>
+                  </button>
+                </div>
+
+                <div className="flex justify-end pt-1">
+                  <button type="button" onClick={() => setSyncConflict(null)} className="px-4 py-2 text-sm text-wave hover:text-tide">取消，暂不同步</button>
+                </div>
+              </div>
+            </>;
+          })()}
         </Modal>
 
         <Modal

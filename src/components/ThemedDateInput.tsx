@@ -94,11 +94,11 @@ export default function ThemedDateInput({ value, onChange, min, max, label, clas
       </button>
       {open ? createPortal(
         <>
-          <button type="button" className="fixed inset-0 z-[90] cursor-default" onClick={() => setOpen(false)} aria-label="关闭日期选择器" />
+          <button type="button" className="fixed inset-0 z-popover cursor-default" onClick={() => setOpen(false)} aria-label="关闭日期选择器" />
           <div
             role="dialog"
             aria-label={`${label}日历`}
-            className="fixed z-[91] w-[280px] rounded-md border border-white/[0.12] bg-[#242524] p-3 text-tide shadow-[0_20px_60px_rgba(0,0,0,0.58)]"
+            className="fixed z-popover w-[280px] rounded-md border border-white/[0.12] bg-surface-modal p-3 text-tide shadow-popover"
             style={position}
           >
             <div className="flex items-center justify-between">

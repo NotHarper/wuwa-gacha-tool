@@ -174,7 +174,15 @@ export default function Navbar() {
               <span className="text-tide">{activePlayerId ? displayUid(activePlayerId) : '选择玩家'}</span>
               <ResonanceIcon kind="chevron" size={14} className={`transition-transform ${menuOpen ? 'rotate-180' : ''}`} />
             </button>
-            {menuOpen && <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />}
+            {/* 和记录页、日期选择器统一用可聚焦的 button，而不是裸 div。 */}
+            {menuOpen && (
+              <button
+                type="button"
+                className="fixed inset-0 z-dropdown cursor-default"
+                onClick={() => setMenuOpen(false)}
+                aria-label="关闭玩家切换菜单"
+              />
+            )}
             <AnimatePresence>
               {menuOpen && (
                 <motion.div
