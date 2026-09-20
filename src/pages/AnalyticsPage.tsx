@@ -12,7 +12,7 @@ import ThemedDateInput from '../components/ThemedDateInput';
 import { recordsPath } from '../lib/recordNavigation';
 import { gachaApi } from '../services/tauri-api';
 import { useGachaStore } from '../store/useGachaStore';
-import type { GachaInsights, PityDistributionBin, PoolInsight } from '../types';
+import { QUALITY, type CumulativePityPoint, type GachaInsights, type GachaRecord, type PityDistributionBin, type PoolInsight } from '../types';
 
 const analyticsCache = new Map<string, GachaInsights>();
 /**
@@ -50,6 +50,8 @@ const CHART_OK_DIM = '#79b9ad';
 const CHART_OK_BRIGHT = '#99d4c9';
 const CHART_DANGER = '#d99a9a';
 const CHART_NEUTRAL = '#bfc4c0';
+/** 按日分桶的最大跨度；超过就按月分桶，避免横轴挤成一团。 */
+const TREND_DAILY_MAX_SPAN_DAYS = 60;
 const LIMITED_ROLE_POOL_TYPES = new Set(['1', '8', '10', '12']);
 const SOFT_PITY_POOL_TYPES = new Set(['1', '2', '3', '4', '6', '7', '8', '9', '10', '11', '12', '13']);
 const FORECAST_THRESHOLDS = [0.5, 0.8, 0.9, 0.95];
@@ -476,6 +478,213 @@ function buildFeaturedDistributionOption(bins: PityDistributionBin[]) {
   };
 }
 
+function buildCumulativeOption(points: CumulativePityPoint[]) {
+  const maxPull = points.at(-1)?.pull ?? 80;
+  return {
+    animationDuration: 520,
+    animationEasing: 'cubicOut',
+    grid: { left: 44, right: 18, top: 36, bottom: 34 },
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: CHART_TOOLTIP_BG,
+      borderColor: 'rgba(212,212,212,0.2)',
+      textStyle: { color: CHART_TOOLTIP_TEXT, fontSize: 11 },
+      formatter: (params: Array<{ dataIndex: number }>) => {
+        const point = points[params[0]?.dataIndex ?? 0];
+        if (!point) return '';
+        return `前 ${point.pull} 抽以内<br/>累计出金 <b>${point.percentage.toFixed(1)}%</b>`;
+      },
+    },
+    xAxis: {
+      type: 'value', min: 1, max: maxPull, interval: 10,
+      axisTick: { show: false },
+      axisLine: { lineStyle: { color: CHART_GRID } },
+      axisLabel: { color: CHART_TEXT, fontSize: 10 },
+      splitLine: { show: false },
+    },
+    yAxis: {
+      type: 'value', min: 0, max: 100, interval: 25,
+      axisLabel: { color: CHART_TEXT, fontSize: 10, formatter: '{value}%' },
+      splitLine: { lineStyle: { color: CHART_GRID, type: 'dashed' } },
+    },
+    series: [{
+      type: 'line',
+      smooth: 0.2,
+      showSymbol: false,
+      data: points.map((point) => [point.pull, point.percentage]),
+      lineStyle: { color: CHART_OK, width: 2 },
+      areaStyle: { color: 'rgba(143,200,190,0.07)' },
+      markLine: {
+        silent: true,
+        symbol: 'none',
+        label: { formatter: '一半的五星', color: CHART_GOLD, fontSize: 10, position: 'insideEndTop' },
+        lineStyle: { color: 'rgba(216,189,132,0.6)', type: 'dashed', width: 1 },
+        data: [{ yAxis: 50 }],
+      },
+    }],
+  };
+}
+
+type TrendGranularity = 'day' | 'month';
+type TrendBucket = { key: string; label: string; pulls: number; fiveStar: number };
+
+const DAY_MS = 86_400_000;
+
+function toDayKey(date: Date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function enumerateDayKeys(first: string, last: string) {
+  const keys: string[] = [];
+  const cursor = new Date(`${first}T00:00:00`);
+  const end = new Date(`${last}T00:00:00`).getTime();
+  while (cursor.getTime() <= end) {
+    keys.push(toDayKey(cursor));
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return keys;
+}
+
+function enumerateMonthKeys(first: string, last: string) {
+  const keys: string[] = [];
+  let [year, month] = first.split('-').map(Number);
+  const [endYear, endMonth] = last.split('-').map(Number);
+  while (year < endYear || (year === endYear && month <= endMonth)) {
+    keys.push(`${year}-${String(month).padStart(2, '0')}`);
+    month += 1;
+    if (month > 12) {
+      month = 1;
+      year += 1;
+    }
+  }
+  return keys;
+}
+
+/**
+ * 按时间分桶统计抽数与五星数。
+ *
+ * 这是纯计数，不涉及保底、UP 或历史起点语义，因此可以直接从 store 的记录算，
+ * 不需要另开后端口径。过滤条件与 insights 请求保持一致（卡池 / 是否含模拟 / 日期范围）。
+ */
+function buildTrendBuckets(
+  records: GachaRecord[],
+  poolType: string,
+  includeMock: boolean,
+  startDate: string,
+  endDate: string,
+): { granularity: TrendGranularity; buckets: TrendBucket[] } {
+  const matched = records.filter((record) => {
+    if (record.card_pool_type !== poolType) return false;
+    if (!includeMock && record.is_mock) return false;
+    const day = record.time.slice(0, 10);
+    if (startDate && day < startDate) return false;
+    if (endDate && day > endDate) return false;
+    return true;
+  });
+  if (matched.length === 0) return { granularity: 'month', buckets: [] };
+
+  const days = matched.map((record) => record.time.slice(0, 10)).sort();
+  const first = days[0];
+  const last = days[days.length - 1];
+  const spanDays = Math.round((new Date(`${last}T00:00:00`).getTime() - new Date(`${first}T00:00:00`).getTime()) / DAY_MS);
+  const granularity: TrendGranularity = spanDays <= TREND_DAILY_MAX_SPAN_DAYS ? 'day' : 'month';
+  const keyOf = (time: string) => granularity === 'day' ? time.slice(0, 10) : time.slice(0, 7);
+
+  const totals = new Map<string, { pulls: number; fiveStar: number }>();
+  matched.forEach((record) => {
+    const key = keyOf(record.time);
+    const entry = totals.get(key) ?? { pulls: 0, fiveStar: 0 };
+    entry.pulls += 1;
+    if (record.quality_level === QUALITY.FIVE_STAR) entry.fiveStar += 1;
+    totals.set(key, entry);
+  });
+
+  // 中间完全没抽的月份/日期补零，否则时间轴会被压缩，看不出真实的停歇期。
+  const keys = granularity === 'day'
+    ? enumerateDayKeys(first, last)
+    : enumerateMonthKeys(first.slice(0, 7), last.slice(0, 7));
+
+  return {
+    granularity,
+    buckets: keys.map((key) => {
+      const entry = totals.get(key) ?? { pulls: 0, fiveStar: 0 };
+      return { key, label: granularity === 'day' ? key.slice(5) : key, pulls: entry.pulls, fiveStar: entry.fiveStar };
+    }),
+  };
+}
+
+function buildTrendOption(buckets: TrendBucket[]) {
+  return {
+    animationDuration: 520,
+    animationEasing: 'cubicOut',
+    grid: { left: 42, right: 38, top: 40, bottom: 34 },
+    legend: {
+      top: 2,
+      right: 0,
+      itemWidth: 14,
+      itemHeight: 8,
+      textStyle: { color: CHART_TEXT, fontSize: 10 },
+      data: ['抽数', '五星'],
+    },
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: CHART_TOOLTIP_BG,
+      borderColor: 'rgba(212,212,212,0.2)',
+      textStyle: { color: CHART_TOOLTIP_TEXT, fontSize: 11 },
+      formatter: (params: Array<{ dataIndex: number }>) => {
+        const bucket = buckets[params[0]?.dataIndex ?? 0];
+        if (!bucket) return '';
+        const rate = bucket.pulls > 0 ? (bucket.fiveStar / bucket.pulls) * 100 : 0;
+        return `${bucket.key}<br/>抽数 <b>${bucket.pulls}</b><br/>五星 <b>${bucket.fiveStar}</b>${bucket.pulls > 0 ? ` · 出金率 ${rate.toFixed(2)}%` : ''}`;
+      },
+    },
+    xAxis: {
+      type: 'category',
+      data: buckets.map((bucket) => bucket.label),
+      axisTick: { show: false },
+      axisLine: { lineStyle: { color: CHART_GRID } },
+      axisLabel: { color: CHART_TEXT, fontSize: 9, hideOverlap: true },
+    },
+    yAxis: [
+      {
+        type: 'value',
+        minInterval: 1,
+        axisLabel: { color: CHART_TEXT, fontSize: 10 },
+        splitLine: { lineStyle: { color: CHART_GRID, type: 'dashed' } },
+      },
+      {
+        type: 'value',
+        minInterval: 1,
+        axisLabel: { color: CHART_TEXT, fontSize: 10 },
+        splitLine: { show: false },
+      },
+    ],
+    series: [
+      {
+        name: '抽数',
+        type: 'bar',
+        yAxisIndex: 0,
+        barMaxWidth: 22,
+        data: buckets.map((bucket) => bucket.pulls),
+        itemStyle: { color: 'rgba(143,200,190,0.45)', borderRadius: [2, 2, 0, 0] },
+        emphasis: { itemStyle: { color: CHART_OK } },
+      },
+      {
+        name: '五星',
+        type: 'line',
+        yAxisIndex: 1,
+        smooth: 0.2,
+        symbol: 'circle',
+        symbolSize: 5,
+        data: buckets.map((bucket) => bucket.fiveStar),
+        lineStyle: { color: CHART_GOLD, width: 1.8 },
+        itemStyle: { color: CHART_GOLD_SOFT },
+        z: 3,
+      },
+    ],
+  };
+}
+
 export default function AnalyticsPage() {
   const navigate = useNavigate();
   const activePlayerId = useGachaStore((state) => state.activePlayerId);
@@ -498,6 +707,12 @@ export default function AnalyticsPage() {
   const poolNavRef = useRef<HTMLElement>(null);
   const [poolIndicator, setPoolIndicator] = useState({ top: 0, height: 0, visible: false });
 
+  // 时间趋势是纯计数，直接用 store 里的记录算，不额外开后端口径。
+  const records = useGachaStore((state) => state.records);
+  const recordsLoaded = useGachaStore((state) => state.recordsLoaded);
+  const recordsPlayerId = useGachaStore((state) => state.recordsPlayerId);
+  const fetchRecords = useGachaStore((state) => state.fetchRecords);
+
   const insightsKey = activePlayerId && (dateMode === 'all' || (startDate && endDate && startDate <= endDate))
     ? `${activePlayerId}|${includeMock ? 'mock' : 'official'}|${dateMode}|${startDate}|${endDate}|${analyticsRevision}`
     : null;
@@ -507,6 +722,13 @@ export default function AnalyticsPage() {
     && requestState?.key === insightsKey && requestState.status === 'loading';
   const insightsFailed = insightsKey !== null && visibleInsights === null
     && requestState?.key === insightsKey && requestState.status === 'error';
+
+  // 直接进入分析页时 store 可能还没有记录；趋势图需要它们。
+  useEffect(() => {
+    if (!initialized || !activePlayerId) return;
+    if (recordsLoaded && recordsPlayerId === activePlayerId) return;
+    void fetchRecords();
+  }, [activePlayerId, fetchRecords, initialized, recordsLoaded, recordsPlayerId]);
 
   useEffect(() => {
     if (!activePlayerId) {
@@ -600,6 +822,27 @@ export default function AnalyticsPage() {
       ? buildFeaturedDistributionOption(activePool.featured_distribution)
       : null,
     [activePool],
+  );
+  const cumulativeOption = useMemo(
+    () => activePool && activePool.cumulative.length > 0 ? buildCumulativeOption(activePool.cumulative) : null,
+    [activePool],
+  );
+  const trend = useMemo(
+    () => activePool && recordsLoaded && recordsPlayerId === activePlayerId
+      ? buildTrendBuckets(
+        records,
+        activePool.pool_type,
+        includeMock,
+        dateMode === 'custom' ? startDate : '',
+        dateMode === 'custom' ? endDate : '',
+      )
+      : { granularity: 'month' as TrendGranularity, buckets: [] as TrendBucket[] },
+    [activePlayerId, activePool, dateMode, endDate, includeMock, records, recordsLoaded, recordsPlayerId, startDate],
+  );
+  // 只有一个分桶时柱状图没有「趋势」可言，不如不画。
+  const trendOption = useMemo(
+    () => trend.buckets.length > 1 ? buildTrendOption(trend.buckets) : null,
+    [trend],
   );
   const officialForecast = useMemo(
     () => dateMode === 'all' && activePool && SOFT_PITY_POOL_TYPES.has(activePool.pool_type) ? buildGachaForecast(activePool) : null,
@@ -962,6 +1205,40 @@ export default function AnalyticsPage() {
                   ) : (
                     <ResonanceEmptyState compact variant="filter" title="还不能计算出金表现" description="同一卡池至少要看到两个五星，才能知道两次五星之间实际用了多少抽" />
                   )}
+
+                  {cumulativeOption || trendOption ? (
+                    // 只剩一张图时不要用两列栅格，否则右半边会空着。
+                    <div className={cumulativeOption && trendOption ? 'analysis-chart-grid' : undefined}>
+                      {cumulativeOption ? (
+                        <section className="analysis-chart-panel">
+                          <div className="analysis-chart-heading">
+                            <div><span>CUMULATIVE / 1–{activePool.cumulative.at(-1)?.pull ?? activeHardPity}</span><h3>抽到第 N 抽时，已经出金的比例</h3></div>
+                            <p>把历史五星按抽数累计起来；曲线越早贴近 100%，说明出金普遍越早</p>
+                          </div>
+                          <AnalyticsChart
+                            option={cumulativeOption}
+                            height={292}
+                            prewarmDelay={420}
+                            ariaLabel={`${activePool.pool_name} 累计出金率曲线：历史中位数 ${formatPull(activePool.median_pity)}，平均 ${formatPull(activePool.average_pity)}。`}
+                          />
+                        </section>
+                      ) : null}
+                      {trendOption ? (
+                        <section className="analysis-chart-panel">
+                          <div className="analysis-chart-heading">
+                            <div><span>TIMELINE / {trend.granularity === 'day' ? 'BY DAY' : 'BY MONTH'}</span><h3>每{trend.granularity === 'day' ? '天' : '月'}抽了多少、出了几个五星</h3></div>
+                            <p>柱为抽数（左轴），线为五星数量（右轴）；中间没有抽卡的{trend.granularity === 'day' ? '日期' : '月份'}按 0 显示</p>
+                          </div>
+                          <AnalyticsChart
+                            option={trendOption}
+                            height={292}
+                            prewarmDelay={540}
+                            ariaLabel={`${activePool.pool_name} 抽卡时间趋势：共 ${trend.buckets.length} 个${trend.granularity === 'day' ? '日' : '月'}区间，累计 ${trend.buckets.reduce((sum, bucket) => sum + bucket.pulls, 0)} 抽、${trend.buckets.reduce((sum, bucket) => sum + bucket.fiveStar, 0)} 个五星。`}
+                          />
+                        </section>
+                      ) : null}
+                    </div>
+                  ) : null}
 
                   {activePool.featured_cycle_count > 0 && featuredOption ? (
                     <section className="analysis-featured-section">
