@@ -541,7 +541,7 @@ export default function OcrImportPage() {
             <div>
               <span className="inline-flex border border-white/[0.08] bg-white/[0.025] px-2 py-0.5 text-[10px] text-wave">{mode === 'screenshot' ? '截图识别' : '批量手动'}</span>
               <h1 className="mt-1.5 text-xl font-semibold text-tide">{mode === 'screenshot' ? '抽卡截图导入' : '批量手动导入'}</h1>
-              <p className="mt-1 text-xs text-wave">{mode === 'screenshot' ? '识别后请核对五星、抽数与顺序，确认后再写入。' : '编辑多条五星与抽数，一次性生成模拟记录。'}</p>
+              <p className="mt-1 text-xs text-wave">{mode === 'screenshot' ? '识别后请核对五星、抽数与顺序，确认后再写入。仅用于补足官方记录之外真正缺失的历史。' : '编辑多条五星与抽数，一次性生成模拟记录。'}</p>
             </div>
           </div>
           {mode === 'screenshot' ? (
@@ -741,7 +741,7 @@ export default function OcrImportPage() {
       </Modal>
 
       <Modal open={confirming} onClose={() => { if (!importing) { setImportError(''); setConfirming(false); } }} closeDisabled={importing} className="max-w-[520px]" labelledBy="batch-confirm-title">
-        <div className="flex items-start justify-between border-b border-white/[0.06] p-5"><div><h2 id="batch-confirm-title" className="modal-title text-base font-medium text-tide">确认写入模拟记录</h2><p className="mt-2 text-sm leading-6 text-wave">将向 UID {displayUid(targetPlayerId.trim()) || '未填写'} 的“{POOL_TYPES.find((item) => item.type === pool)?.name}”插入 {rows.length} 条五星，并自动补足每段抽数。</p></div><ResonanceCloseButton onClick={() => setConfirming(false)} disabled={importing} /></div>
+        <div className="flex items-start justify-between border-b border-white/[0.06] p-5"><div><h2 id="batch-confirm-title" className="modal-title text-base font-medium text-tide">确认写入模拟记录</h2><p className="mt-2 text-sm leading-6 text-wave">将向 UID {displayUid(targetPlayerId.trim()) || '未填写'} 的“{POOL_TYPES.find((item) => item.type === pool)?.name}”插入 {rows.length} 条五星，并自动补足每段抽数。</p><p className="mt-2 text-xs leading-5 text-amber-200/80">建议先完成官方导入，再只补足官方记录之外的缺失历史；不要把已存在的官方区间重复导入。</p></div><ResonanceCloseButton onClick={() => setConfirming(false)} disabled={importing} /></div>
         <dl className="grid grid-cols-2 gap-3 p-5 text-xs"><div><dt className="text-wave">日期范围</dt><dd className="mt-1 text-tide">{effectiveStart} 至 {effectiveEnd}</dd></div><div><dt className="text-wave">日期来源</dt><dd className="mt-1 text-tide">{useRecognizedDates && hasRecognizedDates ? '截图识别' : '手动范围'}</dd></div><div><dt className="text-wave">写入顺序</dt><dd className="mt-1 text-tide">从列表底部到顶部</dd></div><div><dt className="text-wave">数据类型</dt><dd className="mt-1 text-tide">模拟记录</dd></div></dl>
         {dateOverlap && <label className="mx-5 mb-4 flex items-start gap-2 border-l-2 border-amber-300/55 bg-amber-300/[0.06] px-3 py-2 text-xs leading-5 text-amber-100"><input type="checkbox" checked={allowDateOverlap} onChange={(event) => setAllowDateOverlap(event.target.checked)} className="mt-1 accent-amber-300" /><span>目标 UID 的“{POOL_TYPES.find((item) => item.type === pool)?.name}”已有 {dateOverlap.count} 条记录落在 {dateOverlap.earliest} 至 {dateOverlap.latest}，与本次日期范围重叠。我确认仍要导入，并会检查导入后的抽数顺序。</span></label>}
         {importError && <div className="mx-5 mb-4 flex gap-2 border-l-2 border-red-400 bg-red-400/[0.06] px-3 py-2 text-xs leading-5 text-red-200"><ResonanceIcon kind="error" size={15} className="mt-0.5 shrink-0" /><span>{displaySensitiveText(importError)}</span></div>}

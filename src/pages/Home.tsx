@@ -15,6 +15,7 @@ import ResonanceIcon from '../components/ResonanceModeIcon';
 import { ShareMaskedInput, ShareMaskedTextarea } from '../components/ShareMaskedField';
 import { useClickRipple } from '../hooks/useClickRipple';
 import { gachaApi } from '../services/tauri-api';
+import { officialMockOverlapMessage } from '../lib/importConflict';
 import { useGachaStore } from '../store/useGachaStore';
 import { displayGachaUrl, displayPath, displaySensitiveText, displayUid } from '../lib/shareMode';
 import type { CloudGachaLink, GachaImportPreview } from '../types';
@@ -25,6 +26,7 @@ export default function Home() {
   const navigate = useNavigate();
   const activePlayerId = useGachaStore((state) => state.activePlayerId);
   const addToast = useGachaStore((state) => state.addToast);
+  const showOfficialImportConflict = useGachaStore((state) => state.showOfficialImportConflict);
   const fetchHomeOverview = useGachaStore((state) => state.fetchHomeOverview);
   const fetchPools = useGachaStore((state) => state.fetchPools);
   const fetchSummaries = useGachaStore((state) => state.fetchSummaries);
@@ -258,7 +260,9 @@ export default function Home() {
       setImportPreview(preview);
       setShowScanModal(false);
     } catch (error) {
-      addToast('error', String(error));
+      const conflict = officialMockOverlapMessage(error);
+      if (conflict) showOfficialImportConflict(conflict);
+      else addToast('error', String(error));
     } finally {
       setPreviewingImport(false);
     }

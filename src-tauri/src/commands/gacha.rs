@@ -11,7 +11,7 @@ use serde_json::json;
 use tauri::State;
 
 use crate::assets::GachaResource;
-use crate::db::{MockInsertRequest, MockUpdateRequest};
+use crate::db::{Database, MockInsertRequest, MockUpdateRequest};
 use crate::gacha::decoder;
 use crate::gacha::fetcher::{
     self, build_pool_name_to_id, get_display_pool_name, hard_pity_for_pool, pool_type_to_api_name,
@@ -481,6 +481,7 @@ fn merge_and_load_player(
     completed_official_sync: bool,
 ) -> Result<GachaImportResult, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
+    ensure_no_mock_overlap(&db, imported_records)?;
     let stats = db.merge_records(imported_records)?;
     if completed_official_sync {
         db.update_import_info(player_id)?;
@@ -515,6 +516,77 @@ fn merge_and_load_player(
         total_count,
         failed_pools,
     })
+}
+
+/// Official history is the source of truth from the earliest row actually
+/// returned for each pool. Refuse to merge later mock rows so the user can
+/// remove them and re-import the official history first.
+fn ensure_no_mock_overlap(db: &Database, imported_records: &[GachaRecord]) -> Result<(), String> {
+    let official: Vec<_> = imported_records
+        .iter()
+        .filter(|record| !record.is_mock)
+        .collect();
+    if official.is_empty() {
+        return Ok(());
+    }
+
+    let player_id = &official[0].player_id;
+    let existing = db.get_all_records(Some(player_id))?;
+    let mut conflicts = Vec::new();
+    let pool_types: HashSet<String> = official
+        .iter()
+        .map(|record| record.card_pool_type.clone())
+        .collect();
+    for pool_type in pool_types {
+        let pool_official: Vec<_> = official
+            .iter()
+            .filter(|record| record.card_pool_type == pool_type)
+            .collect();
+        let Some(earliest) = pool_official
+            .iter()
+            .map(|record| record.time.as_str())
+            .min()
+        else {
+            continue;
+        };
+        let overlap: Vec<_> = existing
+            .iter()
+            .filter(|record| {
+                record.is_mock
+                    && record.card_pool_type == pool_type
+                    && record.time.as_str() >= earliest
+            })
+            .collect();
+        if !overlap.is_empty() {
+            conflicts.push(format!(
+                "{}：{} 条模拟记录（{} 至 {}）",
+                get_display_pool_name(&pool_type),
+                overlap.len(),
+                overlap
+                    .iter()
+                    .map(|record| record.time.as_str())
+                    .min()
+                    .unwrap_or(earliest)
+                    .get(..10)
+                    .unwrap_or(earliest),
+                overlap
+                    .iter()
+                    .map(|record| record.time.as_str())
+                    .max()
+                    .unwrap_or(earliest)
+                    .get(..10)
+                    .unwrap_or(earliest),
+            ));
+        }
+    }
+    if conflicts.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "OFFICIAL_MOCK_OVERLAP:官方记录导入已取消：从本次最早官方记录起存在模拟记录（{}）。为避免五星重复和抽数错乱，请先删除或清空这些模拟记录，再先导入官方数据，最后仅补足官方记录之外真正缺失的历史。",
+            conflicts.join("；")
+        ))
+    }
 }
 
 /// 从游戏目录解码日志并获取抽卡数据
@@ -758,6 +830,7 @@ pub fn preview_gacha_json_import(
 ) -> Result<GachaImportPreview, String> {
     let (player_id, records, file_hash) = parse_gacha_json_file(&file_path)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
+    ensure_no_mock_overlap(&db, &records)?;
     let stats = db.preview_merge_records(&records)?;
     let existing_count = db.get_all_records(Some(&player_id))?.len();
     let earliest_time = records
@@ -1421,7 +1494,11 @@ pub fn validate_game_dir(game_dir: String) -> GameDirValidation {
     }
 
     let path = std::path::Path::new(&log_path);
-    if path.file_name().is_some_and(|name| name.eq_ignore_ascii_case("Client.log")) && path.is_file() {
+    if path
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("Client.log"))
+        && path.is_file()
+    {
         GameDirValidation {
             valid: true,
             log_path: log_path.clone(),
@@ -1515,6 +1592,90 @@ mod tests {
             is_mock: false,
             mock_batch_id: None,
         }
+    }
+
+    fn temporary_database(label: &str) -> (Database, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "wuwa-gacha-{label}-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        (Database::new(&path).unwrap(), path)
+    }
+
+    #[test]
+    fn official_import_rejects_mock_rows_from_each_pool_earliest_official_record() {
+        let (db, path) = temporary_database("official-mock-overlap");
+        let mut mock = dated_record(10, "2026-01-01 00:00:00");
+        mock.is_mock = true;
+        mock.mock_batch_id = Some("mock-batch".to_string());
+        db.merge_records(&[mock]).unwrap();
+
+        let official = vec![
+            dated_record(1, "2026-01-01 00:00:00"),
+            dated_record(2, "2026-03-01 00:00:00"),
+        ];
+        let error = ensure_no_mock_overlap(&db, &official).unwrap_err();
+        assert!(error.contains("官方记录导入已取消"));
+        assert!(error.contains("角色活动唤取：1 条模拟记录"));
+
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn official_import_rejects_mock_rows_later_than_latest_returned_record() {
+        let (db, path) = temporary_database("official-later-mock-overlap");
+        let mut mock = dated_record(10, "2026-04-01 12:00:00");
+        mock.is_mock = true;
+        mock.mock_batch_id = Some("later-mock-batch".to_string());
+        db.merge_records(&[mock]).unwrap();
+
+        let official = vec![
+            dated_record(1, "2026-01-01 00:00:00"),
+            dated_record(2, "2026-03-01 00:00:00"),
+        ];
+        assert!(ensure_no_mock_overlap(&db, &official).is_err());
+
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn official_import_ignores_mock_rows_before_earliest_or_in_other_pools() {
+        let (db, path) = temporary_database("official-mock-no-overlap");
+        let mut before = dated_record(10, "2025-12-31 23:59:59");
+        before.is_mock = true;
+        before.mock_batch_id = Some("older-history".to_string());
+        let mut other_pool = dated_record(11, "2026-02-01 00:00:00");
+        other_pool.card_pool_type = "2".to_string();
+        other_pool.is_mock = true;
+        other_pool.mock_batch_id = Some("other-pool".to_string());
+        let mut other_player = dated_record(13, "2026-02-01 00:00:00");
+        other_player.player_id = "20002".to_string();
+        other_player.is_mock = true;
+        other_player.mock_batch_id = Some("other-player".to_string());
+        let existing_official = dated_record(12, "2026-02-01 00:00:00");
+        db.merge_records(&[before, other_pool, existing_official])
+            .unwrap();
+        db.merge_records(&[other_player]).unwrap();
+
+        let official = vec![
+            dated_record(1, "2026-01-01 00:00:00"),
+            dated_record(2, "2026-03-01 00:00:00"),
+        ];
+        assert!(ensure_no_mock_overlap(&db, &official).is_ok());
+
+        let mut mock_only_import = dated_record(20, "2026-02-01 00:00:00");
+        mock_only_import.is_mock = true;
+        mock_only_import.mock_batch_id = Some("imported-mock".to_string());
+        assert!(ensure_no_mock_overlap(&db, &[mock_only_import]).is_ok());
+
+        drop(db);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

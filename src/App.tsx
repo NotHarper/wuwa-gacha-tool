@@ -6,10 +6,12 @@ import Toast from './components/Toast';
 import StatusBar from './components/StatusBar';
 import ResonancePulseLayer from './components/ResonancePulseLayer';
 import ImportSummaryPanel from './components/ImportSummaryPanel';
+import OfficialImportConflictDialog from './components/OfficialImportConflictDialog';
 import Home from './pages/Home';
 import OcrImportPage from './pages/OcrImportPage';
 import { useGachaStore } from './store/useGachaStore';
 import { useUpdateStore } from './store/useUpdateStore';
+import { useDevMockImportConflictPreview } from './dev-mock';
 
 const RecordsPage = lazy(() => import('./pages/RecordsPage'));
 const AnalyticsPage = lazy(() => import('./pages/AnalyticsPage'));
@@ -49,6 +51,7 @@ export default function App() {
   const fetchSummaries = useGachaStore((state) => state.fetchSummaries);
   const fetchSettings = useGachaStore((state) => state.fetchSettings);
   const autoCheckUpdate = useUpdateStore(s => s.autoCheck);
+  useDevMockImportConflictPreview(window.location.search);
 
   useEffect(() => {
     fetchSettings();
@@ -69,6 +72,7 @@ export default function App() {
             <AnimatedRoutes />
           </main>
           <ImportSummaryPanel />
+          <OfficialImportConflictDialog />
           <Toast messages={toastMessages} onRemove={removeToast} />
           <StatusBar />
         </div>

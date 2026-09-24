@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { gachaApi } from '../services/tauri-api';
 import { MAX_VISIBLE_TOASTS } from '../lib/toast';
 import { playUiFeedback } from '../lib/uiFeedback';
+import { officialMockOverlapMessage } from '../lib/importConflict';
 import type { ClearRecordsResult, GachaRecord, GachaStats, GameSettings, HomeOverview, ImportCompletionSummary, RecordSummary, ToastMessage } from '../types';
 
 interface GachaStore {
@@ -18,6 +19,7 @@ interface GachaStore {
   error: string | null;
   toastMessages: ToastMessage[];
   lastImportSummary: ImportCompletionSummary | null;
+  officialImportConflict: string | null;
   activePlayerId: string | null;
   confirmedBoundaryPoolTypes: string[];
   confirmedBoundaryPlayerId: string | null;
@@ -42,6 +44,7 @@ interface GachaStore {
   addToast: (type: ToastMessage['type'], message: string) => void;
   removeToast: (id: string) => void;
   dismissImportSummary: () => void;
+  showOfficialImportConflict: (message: string | null) => void;
   scheduleCloudSync: () => void;
   setCloudSyncStatus: (state: GachaStore['cloudSyncStatus']['state'], message: string) => void;
 }
@@ -77,6 +80,7 @@ export const useGachaStore = create<GachaStore>((set, get) => ({
   error: null,
   toastMessages: [],
   lastImportSummary: null,
+  officialImportConflict: null,
   activePlayerId: null,
   confirmedBoundaryPoolTypes: [],
   confirmedBoundaryPlayerId: null,
@@ -218,7 +222,9 @@ export const useGachaStore = create<GachaStore>((set, get) => ({
       void playUiFeedback('scan-complete');
     } catch (e) {
       set({ error: String(e), scanning: false });
-      get().addToast('error', String(e));
+      const conflict = officialMockOverlapMessage(e);
+      if (conflict) set({ officialImportConflict: conflict });
+      else get().addToast('error', String(e));
     }
   },
 
@@ -250,7 +256,9 @@ export const useGachaStore = create<GachaStore>((set, get) => ({
       void playUiFeedback('scan-complete');
     } catch (e) {
       set({ error: String(e), scanning: false });
-      get().addToast('error', String(e));
+      const conflict = officialMockOverlapMessage(e);
+      if (conflict) set({ officialImportConflict: conflict });
+      else get().addToast('error', String(e));
     }
   },
 
@@ -282,7 +290,9 @@ export const useGachaStore = create<GachaStore>((set, get) => ({
       void playUiFeedback('data-rebuilt');
     } catch (e) {
       set({ error: String(e), scanning: false });
-      get().addToast('error', String(e));
+      const conflict = officialMockOverlapMessage(e);
+      if (conflict) set({ officialImportConflict: conflict });
+      else get().addToast('error', String(e));
     }
   },
 
@@ -347,6 +357,7 @@ export const useGachaStore = create<GachaStore>((set, get) => ({
   },
 
   dismissImportSummary: () => set({ lastImportSummary: null }),
+  showOfficialImportConflict: (message) => set({ officialImportConflict: message }),
   scheduleCloudSync: () => scheduleCloudSync(),
   setCloudSyncStatus: (state, message) => set({ cloudSyncStatus: { state, message, updatedAt: Date.now() } }),
 }));
