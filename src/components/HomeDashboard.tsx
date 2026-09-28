@@ -29,8 +29,8 @@ interface FiveStarResult {
 
 const CORE_POOL_TYPES = new Set(['1', '2', '3', '4']);
 const PITY_MILESTONES = [20, 40, 60, 80];
-// 新旅 / 忆旅唤取池：仅有实际抽取记录时才显示
-const OPTIONAL_POOL_TYPES = new Set(['8', '9', '12', '13']);
+// 新旅 / 联动 / 忆旅唤取池：仅有实际抽取记录时才显示
+const OPTIONAL_POOL_TYPES = new Set(['8', '9', '10', '11', '12', '13']);
 const RATIO_DIAL_TICKS = Array.from({ length: 16 }, (_, index) => index * 22.5);
 
 function buildRecentFiveStars(
