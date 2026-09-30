@@ -2502,6 +2502,7 @@ mod tests {
             name: name.to_string(),
             quality_level,
             resource_type: resource_type.to_string(),
+            signature_weapon_id: None,
         }
     }
 

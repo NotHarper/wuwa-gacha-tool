@@ -100,7 +100,7 @@ export default function Modal({
             'fixed inset-0 z-modal flex overflow-y-auto bg-black/65 px-4 backdrop-blur-[3px]',
             placement === 'top'
               ? 'items-start justify-center pb-8 pt-[clamp(56px,12vh,96px)]'
-              : 'items-center justify-center py-8',
+              : 'items-start justify-center py-8',
           )}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
@@ -126,6 +126,7 @@ export default function Modal({
             aria-labelledby={labelledBy}
             className={cn(
               'glass-card resonance-modal relative w-full shrink-0 overflow-hidden outline-none shadow-[0_24px_80px_rgba(0,0,0,0.48),0_0_0_1px_rgba(255,255,255,0.025)]',
+              placement === 'center' && 'my-auto',
               className,
             )}
             initial={{ opacity: 0, y: 12, scale: 0.985 }}

@@ -1,10 +1,12 @@
-import { useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   ArrowDown,
   ArrowRight,
   ArrowUp,
+  ArrowLeftRight,
+  Layers,
   ChevronsLeft,
   ChevronsRight,
   LoaderCircle,
@@ -48,6 +50,11 @@ type FeaturedAcquisitionRow = {
 type FeaturedListRow =
   | { kind: 'featured'; row: FeaturedAcquisitionRow }
   | { kind: 'record'; item: RecordWithPity };
+type AcquisitionDisplayRecord = AcquisitionRecordInsight & { pool_type: string; pool_name: string };
+type AcquisitionDisplay = Omit<ResourceAcquisitionInsight, 'records'> & {
+  relatedInsights: ResourceAcquisitionInsight[];
+  records: AcquisitionDisplayRecord[];
+};
 
 interface RecordPreferences {
   viewMode: ViewMode;
@@ -98,6 +105,13 @@ const getBarColor = (pity: number) => {
   if (pity <= 30) return '#7ec8a0';
   if (pity <= 60) return '#e8c87a';
   return '#e88a7a';
+};
+
+const getPairedResourceId = (resources: GachaResource[], resourceId: number, resourceType: string): number | null => {
+  if (resourceType === 'role') {
+    return resources.find((resource) => resource.resource_id === resourceId)?.signature_weapon_id ?? null;
+  }
+  return resources.find((resource) => resource.signature_weapon_id === resourceId)?.resource_id ?? null;
 };
 
 function RecordAvatar({ record, size = 'md', gridStyle = 'avatar' }: { record: GachaRecord; size?: 'sm' | 'md' | 'lg'; gridStyle?: GridStyle }) {
@@ -204,6 +218,7 @@ export default function RecordsPage() {
   const [gridColumns, setGridColumns] = useState(10);
   const [resources, setResources] = useState<GachaResource[]>([]);
   const [resourcesLoading, setResourcesLoading] = useState(false);
+  const resourcesLoadStartedRef = useRef(false);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [missingPlayerDialogOpen, setMissingPlayerDialogOpen] = useState(false);
   const [editingRecord, setEditingRecord] = useState<GachaRecord | null>(null);
@@ -212,7 +227,8 @@ export default function RecordsPage() {
   const [acquisitionInsights, setAcquisitionInsights] = useState<ResourceAcquisitionInsight[]>([]);
   const [acquisitionInsightsLoaded, setAcquisitionInsightsLoaded] = useState(false);
   const [confirmedBoundaryPoolTypes, setConfirmedBoundaryPoolTypes] = useState<string[] | null>(null);
-  const [selectedAcquisition, setSelectedAcquisition] = useState<ResourceAcquisitionInsight | null>(null);
+  const [acquisitionAnchor, setSelectedAcquisition] = useState<ResourceAcquisitionInsight | null>(null);
+  const [acquisitionView, setAcquisitionView] = useState<'single' | 'summary'>('single');
   const [selectedAcquisitionRecordId, setSelectedAcquisitionRecordId] = useState<number | null>(null);
   const [pendingTarget, setPendingTarget] = useState<RecordNavigationTarget | null>(null);
   const [highlightedRecordId, setHighlightedRecordId] = useState<number | null>(null);
@@ -293,7 +309,7 @@ export default function RecordsPage() {
     [confirmedBoundaryPoolTypes],
   );
 
-  const loadResources = async () => {
+  const loadResources = useCallback(async () => {
     if (resources.length > 0 || resourcesLoading) return;
     setResourcesLoading(true);
     try {
@@ -303,7 +319,13 @@ export default function RecordsPage() {
     } finally {
       setResourcesLoading(false);
     }
-  };
+  }, [addToast, resources.length, resourcesLoading]);
+
+  useEffect(() => {
+    if (!initialized || resourcesLoadStartedRef.current) return;
+    resourcesLoadStartedRef.current = true;
+    void loadResources();
+  }, [initialized, loadResources]);
 
   const openInsertDialog = () => {
     if (!activePlayerId) {
@@ -763,10 +785,80 @@ export default function RecordsPage() {
   const openAcquisition = (record: GachaRecord) => {
     if (record.quality_level !== QUALITY.FIVE_STAR || (record.is_off_rate && record.card_pool_group === 'UP角色池')) return;
     const insight = acquisitionInsights.find((item) => item.pool_type === record.card_pool_type && item.resource_id === record.resource_id);
-    if (insight) {
-      setSelectedAcquisition(insight);
-      setSelectedAcquisitionRecordId(record.id ?? null);
-    }
+    if (!insight) return;
+    setSelectedAcquisition(insight);
+    setAcquisitionView('single');
+    setSelectedAcquisitionRecordId(record.id ?? null);
+  };
+
+  const pairedResourceId = acquisitionAnchor
+    ? getPairedResourceId(resources, acquisitionAnchor.resource_id, acquisitionAnchor.resource_type)
+    : null;
+  const pairedResource = resources.find((item) => item.resource_id === pairedResourceId);
+  const selectedAcquisition = useMemo<AcquisitionDisplay | null>(() => {
+    if (!acquisitionAnchor) return null;
+    const relatedInsights = acquisitionView === 'summary' && pairedResourceId !== null
+      ? acquisitionInsights.filter((item) => item.resource_id === pairedResourceId)
+      : [];
+    const ownInsights = acquisitionView === 'summary'
+      ? acquisitionInsights.filter((item) => item.resource_id === acquisitionAnchor.resource_id)
+      : [acquisitionAnchor];
+    const allInsights = [...ownInsights, ...relatedInsights];
+    const displayRecords = allInsights
+      .flatMap((item) => item.records.map((itemRecord) => ({
+        ...itemRecord,
+        pool_type: item.pool_type,
+        pool_name: item.pool_name,
+      })))
+      .sort((a, b) => a.time.localeCompare(b.time) || (a.id ?? 0) - (b.id ?? 0));
+    return {
+      ...acquisitionAnchor,
+      relatedInsights,
+      records: displayRecords,
+      target_count: allInsights.reduce((sum, item) => sum + item.target_count, 0),
+      off_rate_count: allInsights.reduce((sum, item) => sum + item.off_rate_count, 0),
+      total_five_star_count: allInsights.reduce((sum, item) => sum + item.total_five_star_count, 0),
+      total_pulls: allInsights.reduce((sum, item) => sum + item.total_pulls, 0),
+      average_pulls: allInsights.some((item) => item.target_count > 0)
+        ? allInsights.reduce((sum, item) => sum + item.total_pulls, 0) / Math.max(1, allInsights.reduce((sum, item) => sum + item.target_count, 0))
+        : null,
+      is_lower_bound: allInsights.some((item) => item.is_lower_bound),
+      has_off_rate: allInsights.some((item) => item.has_off_rate),
+    };
+  }, [acquisitionAnchor, acquisitionView, acquisitionInsights, pairedResourceId]);
+
+  const acquisitionSummary = useMemo(() => {
+    if (!acquisitionAnchor || !pairedResource) return [];
+    return [acquisitionAnchor, pairedResource]
+      .sort((a, b) => Number(b.resource_type === 'role') - Number(a.resource_type === 'role'))
+      .map((resource) => {
+        const insights = acquisitionInsights.filter((item) => item.resource_id === resource.resource_id);
+        const pulls = insights.reduce((sum, item) => sum + item.total_pulls, 0);
+        const count = insights.reduce((sum, item) => sum + item.target_count, 0);
+        return {
+          resource,
+          pulls,
+          average: count > 0 ? pulls / count : null,
+          lowerBound: insights.some((item) => item.is_lower_bound),
+          offRateCount: insights.reduce((sum, item) => sum + item.off_rate_count, 0),
+          fiveStarCount: insights.reduce((sum, item) => sum + item.total_five_star_count, 0),
+        };
+      });
+  }, [acquisitionAnchor, pairedResource, acquisitionInsights]);
+
+  const switchAcquisitionResource = () => {
+    if (!acquisitionAnchor || !pairedResource) return;
+    const insight = acquisitionInsights.find((item) => item.resource_id === pairedResource.resource_id);
+    setSelectedAcquisition(insight ?? {
+      pool_type: '', pool_name: '暂无获取记录',
+      resource_id: pairedResource.resource_id, name: pairedResource.name,
+      resource_type: pairedResource.resource_type,
+      target_count: 0, off_rate_count: 0, total_five_star_count: 0,
+      total_pulls: 0, average_pulls: null, is_lower_bound: false,
+      has_off_rate: false, records: [],
+    });
+    setAcquisitionView('single');
+    setSelectedAcquisitionRecordId(insight?.records.at(-1)?.id ?? null);
   };
 
   const acquisitionRecords = useMemo(
@@ -783,7 +875,7 @@ export default function RecordsPage() {
 
   const locateAcquisitionRecord = (recordId: number | null | undefined) => {
     if (recordId == null || !selectedAcquisition) return;
-    const poolType = selectedAcquisition.pool_type;
+    const poolType = selectedAcquisition.records.find((record) => record.id === recordId)?.pool_type ?? selectedAcquisition.pool_type;
     setSelectedAcquisition(null);
     setSelectedAcquisitionRecordId(null);
     queueRecordTarget({ recordId, poolType, source: 'acquisition-trace' });
@@ -1482,12 +1574,41 @@ export default function RecordsPage() {
               </div>
               <div className="min-w-0">
                 <span className="records-meta-label">ACQUISITION TRACE</span>
-                <h2 id="acquisition-trace-title" className="mt-1 text-lg font-semibold text-tide">{selectedAcquisition.name}</h2>
-                <p className="mt-1 text-xs text-wave">{selectedAcquisition.pool_name} · {selectedAcquisition.target_count} 次获取</p>
+                <h2 id="acquisition-trace-title" className="mt-1 text-lg font-semibold text-tide">
+                  {selectedAcquisition.name}
+                  {acquisitionView === 'summary' && pairedResource ? ` + ${pairedResource.name}` : ''}
+                </h2>
+                <p className="mt-1 text-xs text-wave">
+                  {acquisitionView === 'summary' ? '角色 + 专武' : `${selectedAcquisition.pool_name} · ${selectedAcquisition.target_count} 次获取`}
+                </p>
+                {pairedResource && (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => acquisitionView === 'summary' ? setAcquisitionView('single') : switchAcquisitionResource()}
+                      className="flex min-h-8 items-center gap-1.5 rounded-md border border-white/[0.10] px-2.5 text-xs text-wave hover:bg-white/[0.05] hover:text-tide"
+                      title={acquisitionView === 'summary' ? selectedAcquisition.name : pairedResource.name}
+                    >
+                      <ArrowLeftRight size={14} />
+                      {acquisitionView === 'summary'
+                        ? `查看${selectedAcquisition.resource_type === 'role' ? '角色' : '专武'}`
+                        : `切换至${selectedAcquisition.resource_type === 'role' ? '专武' : '角色'}`}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAcquisitionView(acquisitionView === 'summary' ? 'single' : 'summary')}
+                      aria-pressed={acquisitionView === 'summary'}
+                      className={`flex min-h-8 items-center gap-1.5 rounded-md border px-2.5 text-xs ${acquisitionView === 'summary' ? 'border-[#d8bd84]/30 bg-[#d8bd84]/[0.08] text-[#d8bd84]' : 'border-white/[0.10] text-wave hover:bg-white/[0.05] hover:text-tide'}`}
+                    >
+                      <Layers size={14} />
+                      {acquisitionView === 'summary' ? '返回单项' : '查看汇总'}
+                    </button>
+                  </div>
+                )}
               </div>
               <div className="ml-auto flex shrink-0 items-center gap-1">
                 <button type="button" onClick={() => stepAcquisition(-1)} disabled={selectedAcquisitionIndex <= 0} className="flex h-8 w-8 items-center justify-center rounded-md text-wave hover:bg-white/[0.05] hover:text-tide disabled:opacity-25" title="上一条获取记录" aria-label="上一条获取记录"><ResonanceIcon kind="previous" size={14} /></button>
-                <span className="min-w-12 text-center text-[10px] tabular-nums text-wave">{selectedAcquisitionIndex >= 0 ? selectedAcquisitionIndex + 1 : 1}/{acquisitionRecords.length}</span>
+                <span className="min-w-12 text-center text-[10px] tabular-nums text-wave">{selectedAcquisitionIndex >= 0 ? selectedAcquisitionIndex + 1 : acquisitionRecords.length > 0 ? 1 : 0}/{acquisitionRecords.length}</span>
                 <button type="button" onClick={() => stepAcquisition(1)} disabled={selectedAcquisitionIndex >= acquisitionRecords.length - 1} className="flex h-8 w-8 items-center justify-center rounded-md text-wave hover:bg-white/[0.05] hover:text-tide disabled:opacity-25" title="下一条获取记录" aria-label="下一条获取记录"><ResonanceIcon kind="next" size={14} /></button>
                 <ResonanceCloseButton onClick={() => setSelectedAcquisition(null)} className="ml-1 shrink-0" />
               </div>
@@ -1498,6 +1619,41 @@ export default function RecordsPage() {
                 </button>
               ) : null}
             </div>
+            {acquisitionView === 'summary' ? (
+              <div className="border-b border-white/[0.07] px-5 py-4">
+                <div className="mb-4 flex items-baseline justify-between gap-3">
+                  <span className="text-xs text-wave">整体总抽数</span>
+                  <span className="text-xl font-semibold tabular-nums text-[#d8bd84]">{selectedAcquisition.is_lower_bound ? '≥' : ''}{selectedAcquisition.total_pulls}<span className="ml-1.5 text-xs font-normal text-wave">抽</span></span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="text-[10px] text-wave">
+                      <tr className="border-b border-white/[0.07]">
+                        <th scope="col" className="pb-2 font-normal">角色 / 专武</th>
+                        <th scope="col" className="pb-2 pl-4 text-right font-normal whitespace-nowrap">总抽数</th>
+                        <th scope="col" className="pb-2 pl-4 text-right font-normal whitespace-nowrap">平均每次</th>
+                        <th scope="col" className="pb-2 pl-4 text-right font-normal whitespace-nowrap">角色歪 / 五星</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {acquisitionSummary.map(({ resource, pulls, average, lowerBound, offRateCount, fiveStarCount }) => (
+                        <tr key={resource.resource_id} className="border-b border-white/[0.05] last:border-0">
+                          <th scope="row" className="py-3 font-normal text-tide">
+                            <div className="flex items-center gap-2">
+                              <ResourceIcon resourceId={resource.resource_id} alt="" className="h-9 w-9 shrink-0 rounded object-contain" fallback={<span className="flex h-9 w-9 shrink-0 items-center justify-center rounded bg-white/[0.06] text-wave">{resource.name.charAt(0)}</span>} />
+                              <div><div>{resource.name}</div><div className="mt-0.5 text-[10px] text-wave">{resource.resource_type === 'role' ? '角色' : '专武'}</div></div>
+                            </div>
+                          </th>
+                          <td className="py-3 pl-4 text-right tabular-nums text-tide whitespace-nowrap">{lowerBound ? '≥' : ''}{pulls} 抽</td>
+                          <td className="py-3 pl-4 text-right tabular-nums text-tide whitespace-nowrap">{average === null ? '—' : `${lowerBound ? '≥' : ''}${average.toFixed(1)} 抽`}</td>
+                          <td className="py-3 pl-4 text-right tabular-nums text-wave whitespace-nowrap">{resource.resource_type === 'role' ? `${offRateCount} / ${fiveStarCount}` : '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : (
             <div className="grid grid-cols-2 gap-px border-b border-white/[0.07] bg-white/[0.06] sm:grid-cols-4">
               {[
                 ['获取数量', `${selectedAcquisition.target_count} 次`],
@@ -1506,8 +1662,10 @@ export default function RecordsPage() {
                 ['平均每次', `${selectedAcquisition.is_lower_bound ? '≥' : ''}${selectedAcquisition.average_pulls?.toFixed(1) ?? '—'} 抽`],
               ].map(([label, value]) => <div key={label} className="bg-[#242424] px-4 py-3"><div className="text-[10px] text-wave">{label}</div><div className="mt-1 text-base font-semibold tabular-nums text-tide">{value}</div></div>)}
             </div>
+            )}
             <div className="max-h-[58vh] overflow-y-auto px-5 py-4">
               <div className="space-y-2">
+                {acquisitionRecords.length === 0 && <p className="py-8 text-center text-sm text-wave">暂无获取记录</p>}
                 {acquisitionRecords.map((item, index) => (
                   <button
                     type="button"
@@ -1517,8 +1675,8 @@ export default function RecordsPage() {
                     title="在记录页中定位"
                   >
                     <ResourceIcon resourceId={item.resource_id} alt="" className="h-9 w-9 shrink-0 rounded" fallback={<span className="flex h-9 w-9 items-center justify-center rounded bg-white/[0.06] text-xs text-wave">{item.name.charAt(0)}</span>} />
-                    <div className="min-w-0 w-24 shrink-0"><div className="truncate text-xs text-tide">{item.name}</div><div className="mt-0.5 text-[10px] text-wave">{item.is_off_rate ? `第 ${String(item.acquisition_index).padStart(2, '0')} 次 · 前置歪` : `第 ${String(item.acquisition_index).padStart(2, '0')} 次获取`}</div></div>
-                    <div className="relative h-4 min-w-0 flex-1 overflow-hidden rounded bg-white/[0.06]"><div className="record-pity-progress-fill h-full rounded" style={{ width: `${Math.min(item.pity / (selectedAcquisition.pool_type === '5' ? 50 : 80) * 100, 100)}%`, backgroundColor: getBarColor(item.pity) }} /></div>
+                    <div className="min-w-0 w-32 shrink-0"><div className="truncate text-xs text-tide">{item.name}</div><div className="mt-0.5 truncate text-[10px] text-wave">{item.pool_name} · {item.is_off_rate ? `第 ${String(item.acquisition_index).padStart(2, '0')} 次 · 前置歪` : `第 ${String(item.acquisition_index).padStart(2, '0')} 次获取`}</div></div>
+                    <div className="relative h-4 min-w-0 flex-1 overflow-hidden rounded bg-white/[0.06]"><div className="record-pity-progress-fill h-full rounded" style={{ width: `${Math.min(item.pity / (item.pool_type === '5' ? 50 : 80) * 100, 100)}%`, backgroundColor: getBarColor(item.pity) }} /></div>
                     <PityBadge pity={item.pity} lowerBound={item.is_lower_bound} />
                     <span className="hidden w-20 shrink-0 text-right text-[10px] tabular-nums text-wave sm:block">{item.time.slice(0, 10)}</span>
                   </button>

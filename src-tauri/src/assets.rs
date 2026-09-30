@@ -56,6 +56,8 @@ pub struct GachaResource {
     pub name: String,
     pub quality_level: i32,
     pub resource_type: String,
+    #[serde(default)]
+    pub signature_weapon_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -402,6 +404,7 @@ async fn fetch_catalog(client: &reqwest::Client, version: &str) -> Result<AssetC
                         name: resource.zh,
                         quality_level: resource.rank,
                         resource_type: resource_type.to_string(),
+                        signature_weapon_id: None,
                     });
                 }
             }

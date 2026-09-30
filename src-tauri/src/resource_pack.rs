@@ -668,6 +668,7 @@ mod tests {
                 name: "测试资源".to_string(),
                 quality_level: 5,
                 resource_type: "role".to_string(),
+                signature_weapon_id: None,
             }],
         }
     }

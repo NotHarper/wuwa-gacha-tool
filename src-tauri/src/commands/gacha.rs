@@ -1702,12 +1702,14 @@ mod tests {
             name: "三星".to_string(),
             quality_level: 3,
             resource_type: "weapon".to_string(),
+            signature_weapon_id: None,
         };
         let four = GachaResource {
             resource_id: 2,
             name: "四星".to_string(),
             quality_level: 4,
             resource_type: "role".to_string(),
+            signature_weapon_id: None,
         };
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
         let fillers = build_filler_resources(&[&three], &[&four], 79, 0, 0, &mut rng).unwrap();
@@ -1730,12 +1732,14 @@ mod tests {
             name: "三星".to_string(),
             quality_level: 3,
             resource_type: "weapon".to_string(),
+            signature_weapon_id: None,
         };
         let four = GachaResource {
             resource_id: 2,
             name: "四星".to_string(),
             quality_level: 4,
             resource_type: "role".to_string(),
+            signature_weapon_id: None,
         };
         let mut rng = rand::rngs::StdRng::seed_from_u64(7);
 

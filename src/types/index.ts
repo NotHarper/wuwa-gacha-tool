@@ -20,6 +20,7 @@ export interface GachaResource {
   name: string;
   quality_level: number;
   resource_type: 'role' | 'weapon';
+  signature_weapon_id?: number | null;
 }
 
 export interface OcrAlternative {
