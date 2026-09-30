@@ -121,7 +121,30 @@ struct ApiRequest<'a> {
 struct ApiResponse {
     code: i32,
     #[serde(default)]
+    message: String,
+    #[serde(default)]
     data: Vec<ApiCardInfo>,
+}
+
+/// 把 API 错误码转换成用户可理解的提示
+fn format_api_error(code: i32, message: &str) -> String {
+    let base = if message.is_empty() {
+        format!("API 错误码: {}", code)
+    } else {
+        format!("API 错误码: {}（{}）", code, message)
+    };
+
+    // 已知错误码的额外建议
+    let hint = match code {
+        -1 => Some("抽卡链接已失效，请重新获取有效的抽卡历史记录链接。"),
+        _ => None,
+    };
+
+    if let Some(hint) = hint {
+        format!("{} {}", base, hint)
+    } else {
+        base
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -230,7 +253,7 @@ pub async fn fetch_pool_data(
         .map_err(|e| format!("解析响应失败: {} | 原始: {}", e, body_text))?;
 
     if api_response.code != 0 {
-        return Err(format!("API 错误码: {}", api_response.code));
+        return Err(format_api_error(api_response.code, &api_response.message));
     }
 
     Ok(api_response.data)
@@ -334,5 +357,43 @@ mod tests {
         };
         let json = serde_json::to_string(&request_body).unwrap();
         assert!(json.contains("\"cardPoolType\":\"1\""));
+    }
+
+    #[test]
+    fn api_error_includes_message_when_present() {
+        let msg = format_api_error(-1, "请求游戏获取日志异常!");
+        assert!(msg.contains("API 错误码: -1"));
+        assert!(msg.contains("请求游戏获取日志异常!"));
+    }
+
+    #[test]
+    fn api_error_code_minus_one_gives_hint() {
+        let msg = format_api_error(-1, "请求游戏获取日志异常!");
+        assert!(msg.contains("抽卡链接已失效"));
+        assert!(msg.contains("重新获取有效的抽卡历史记录链接"));
+    }
+
+    #[test]
+    fn api_error_without_message_omits_parentheses() {
+        let msg = format_api_error(403, "");
+        assert!(msg.contains("API 错误码: 403"));
+        assert!(!msg.contains("（"));
+    }
+
+    #[test]
+    fn api_response_deserializes_message_field() {
+        let json = r#"{"code":-1,"message":"请求游戏获取日志异常!","data":[]}"#;
+        let resp: ApiResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.code, -1);
+        assert_eq!(resp.message, "请求游戏获取日志异常!");
+        assert!(resp.data.is_empty());
+    }
+
+    #[test]
+    fn api_response_message_defaults_to_empty() {
+        let json = r#"{"code":0,"data":[]}"#;
+        let resp: ApiResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.code, 0);
+        assert_eq!(resp.message, "");
     }
 }
