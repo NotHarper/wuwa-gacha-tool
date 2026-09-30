@@ -1703,6 +1703,7 @@ mod tests {
             quality_level: 3,
             resource_type: "weapon".to_string(),
             signature_weapon_id: None,
+            release_order: None,
         };
         let four = GachaResource {
             resource_id: 2,
@@ -1710,6 +1711,7 @@ mod tests {
             quality_level: 4,
             resource_type: "role".to_string(),
             signature_weapon_id: None,
+            release_order: None,
         };
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
         let fillers = build_filler_resources(&[&three], &[&four], 79, 0, 0, &mut rng).unwrap();
@@ -1733,6 +1735,7 @@ mod tests {
             quality_level: 3,
             resource_type: "weapon".to_string(),
             signature_weapon_id: None,
+            release_order: None,
         };
         let four = GachaResource {
             resource_id: 2,
@@ -1740,6 +1743,7 @@ mod tests {
             quality_level: 4,
             resource_type: "role".to_string(),
             signature_weapon_id: None,
+            release_order: None,
         };
         let mut rng = rand::rngs::StdRng::seed_from_u64(7);
 

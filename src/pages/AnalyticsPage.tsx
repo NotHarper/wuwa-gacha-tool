@@ -8,11 +8,12 @@ import PageTransition from '../components/PageTransition';
 import PageSignalField from '../components/PageSignalField';
 import ResonanceEmptyState from '../components/ResonanceEmptyState';
 import ResonanceIcon from '../components/ResonanceModeIcon';
+import ResourceIcon from '../components/ResourceIcon';
 import ThemedDateInput from '../components/ThemedDateInput';
 import { recordsPath } from '../lib/recordNavigation';
 import { gachaApi } from '../services/tauri-api';
 import { useGachaStore } from '../store/useGachaStore';
-import { QUALITY, type CumulativePityPoint, type GachaInsights, type GachaRecord, type PityDistributionBin, type PoolInsight } from '../types';
+import { QUALITY, type CumulativePityPoint, type GachaInsights, type GachaRecord, type GachaResource, type PityDistributionBin, type PoolInsight, type ResourceAcquisitionInsight } from '../types';
 
 const analyticsCache = new Map<string, GachaInsights>();
 /**
@@ -82,6 +83,60 @@ interface ProbabilityModelPoint {
 interface PersonalCalibration {
   factor: number;
   weight: number;
+}
+
+interface InvestmentRow {
+  role: GachaResource;
+  weapon: GachaResource;
+  rolePulls: number;
+  weaponPulls: number;
+  roleAverage: number | null;
+  weaponAverage: number | null;
+  roleLowerBound: boolean;
+  weaponLowerBound: boolean;
+  roleCount: number;
+  weaponCount: number;
+}
+
+function buildInvestmentRows(resources: GachaResource[], insights: ResourceAcquisitionInsight[]): InvestmentRow[] {
+  const byResource = new Map<number, ResourceAcquisitionInsight[]>();
+  insights.forEach((insight) => {
+    const current = byResource.get(insight.resource_id) ?? [];
+    byResource.set(insight.resource_id, [...current, insight]);
+  });
+  return resources
+    .filter((resource) => resource.resource_type === 'role' && resource.signature_weapon_id !== null && resource.signature_weapon_id !== undefined)
+    .map((role) => {
+      const weapon = resources.find((resource) => resource.resource_id === role.signature_weapon_id);
+      if (!weapon) return null;
+      const summarize = (resource: GachaResource) => {
+        const resourceInsights = byResource.get(resource.resource_id) ?? [];
+        const pulls = resourceInsights.reduce((sum, insight) => sum + insight.total_pulls, 0);
+        const count = resourceInsights.reduce((sum, insight) => sum + insight.target_count, 0);
+        return {
+          pulls,
+          average: count > 0 ? pulls / count : null,
+          lowerBound: resourceInsights.some((insight) => insight.is_lower_bound),
+          count,
+        };
+      };
+      const roleSummary = summarize(role);
+      const weaponSummary = summarize(weapon);
+      if (roleSummary.count === 0 && weaponSummary.count === 0) return null;
+      return {
+        role,
+        weapon,
+        rolePulls: roleSummary.pulls,
+        weaponPulls: weaponSummary.pulls,
+        roleAverage: roleSummary.average,
+        weaponAverage: weaponSummary.average,
+        roleLowerBound: roleSummary.lowerBound,
+        weaponLowerBound: weaponSummary.lowerBound,
+        roleCount: roleSummary.count,
+        weaponCount: weaponSummary.count,
+      };
+    })
+    .filter((row): row is InvestmentRow => row !== null);
 }
 
 function fiveStarRateAtPity(pull: number) {
@@ -693,6 +748,12 @@ export default function AnalyticsPage() {
   const activeRecordCount = useGachaStore((state) => state.summaries.find((summary) => summary.player_id === state.activePlayerId)?.record_count ?? 0);
   const activeSummary = useGachaStore((state) => state.summaries.find((summary) => summary.player_id === state.activePlayerId) ?? null);
   const [includeMock, setIncludeMock] = useState(true);
+  const [analysisView, setAnalysisView] = useState<'pools' | 'investment'>('pools');
+  const [investmentSort, setInvestmentSort] = useState<'release' | 'total'>('release');
+  const [investmentResources, setInvestmentResources] = useState<GachaResource[]>([]);
+  const [investmentInsights, setInvestmentInsights] = useState<ResourceAcquisitionInsight[]>([]);
+  const [investmentLoading, setInvestmentLoading] = useState(false);
+  const [investmentFailed, setInvestmentFailed] = useState(false);
   const [insights, setInsights] = useState<{ key: string; data: GachaInsights } | null>(null);
   const [activePoolType, setActivePoolType] = useState<string | null>(null);
   const [plannedPulls, setPlannedPulls] = useState(20);
@@ -729,6 +790,34 @@ export default function AnalyticsPage() {
     if (recordsLoaded && recordsPlayerId === activePlayerId) return;
     void fetchRecords();
   }, [activePlayerId, fetchRecords, initialized, recordsLoaded, recordsPlayerId]);
+
+  useEffect(() => {
+    if (!initialized || !activePlayerId) {
+      setInvestmentResources([]);
+      setInvestmentInsights([]);
+      return;
+    }
+    let current = true;
+    setInvestmentLoading(true);
+    setInvestmentFailed(false);
+    Promise.all([
+      gachaApi.getGachaResources(),
+      gachaApi.getResourceAcquisitionInsights(activePlayerId, includeMock),
+    ])
+      .then(([resources, resourceInsights]) => {
+        if (!current) return;
+        setInvestmentResources(resources);
+        setInvestmentInsights(resourceInsights);
+      })
+      .catch(() => {
+        if (!current) return;
+        setInvestmentFailed(true);
+      })
+      .finally(() => {
+        if (current) setInvestmentLoading(false);
+      });
+    return () => { current = false; };
+  }, [activePlayerId, analyticsRevision, includeMock, initialized]);
 
   useEffect(() => {
     if (!activePlayerId) {
@@ -810,6 +899,12 @@ export default function AnalyticsPage() {
       ?? null,
     [activePoolType, visibleInsights],
   );
+  const investmentRows = useMemo(() => {
+    const rows = buildInvestmentRows(investmentResources, investmentInsights);
+    return investmentSort === 'total'
+      ? [...rows].sort((a, b) => (b.rolePulls + b.weaponPulls) - (a.rolePulls + a.weaponPulls))
+      : [...rows].sort((a, b) => (a.role.release_order ?? Number.MAX_SAFE_INTEGER) - (b.role.release_order ?? Number.MAX_SAFE_INTEGER));
+  }, [investmentInsights, investmentResources, investmentSort]);
   const reliability = activePool ? RELIABILITY[activePool.reliability] : RELIABILITY.insufficient;
   const activeHardPity = activePool?.pool_type === '5' ? 50 : 80;
   const distributionOption = useMemo(
@@ -929,7 +1024,11 @@ export default function AnalyticsPage() {
           <PageSignalField variant="analysis" />
           <div className="analysis-hero-copy">
             <h1 className="page-title text-xl font-semibold text-tide">唤取分析</h1>
-            <p className="page-subtitle mt-1 text-xs text-wave">{activePool ? `${activePool.pool_name} · ${activePool.five_star_count} 个五星 · ${activePool.complete_interval_count} 个完整区间` : '用历史记录对照官方概率'}</p>
+            <p className="page-subtitle mt-1 text-xs text-wave">{analysisView === 'investment' ? '角色与专武的整体换取成本' : activePool ? `${activePool.pool_name} · ${activePool.five_star_count} 个五星 · ${activePool.complete_interval_count} 个完整区间` : '用历史记录对照官方概率'}</p>
+            <div className="mt-3 inline-flex rounded-lg border border-white/[0.12] bg-[#202321]/90 p-1 shadow-[0_8px_24px_rgba(0,0,0,0.22)]" role="tablist" aria-label="分析视图">
+              <button type="button" role="tab" aria-selected={analysisView === 'pools'} onClick={() => setAnalysisView('pools')} className={`rounded-md px-4 py-2 text-xs font-medium transition-colors ${analysisView === 'pools' ? 'bg-[#d8bd84]/[0.16] text-[#e7d5a8]' : 'text-wave hover:bg-white/[0.06] hover:text-tide'}`}>卡池分析</button>
+              <button type="button" role="tab" aria-selected={analysisView === 'investment'} onClick={() => setAnalysisView('investment')} className={`rounded-md px-4 py-2 text-xs font-medium transition-colors ${analysisView === 'investment' ? 'bg-[#d8bd84]/[0.16] text-[#e7d5a8]' : 'text-wave hover:bg-white/[0.06] hover:text-tide'}`}>角色投入</button>
+            </div>
           </div>
           <button type="button" role="switch" aria-checked={includeMock} onClick={() => setIncludeMock((value) => !value)} className="analysis-toggle-control">
             <span className="resonance-toggle" data-active={includeMock ? 'true' : 'false'} aria-hidden="true"><span className="resonance-toggle-track"><span className="resonance-toggle-node" /></span></span>
@@ -937,16 +1036,16 @@ export default function AnalyticsPage() {
           </button>
         </header>
 
-        <div className="analysis-workbench">
-          <aside className="analysis-sidebar">
+        <div className={`analysis-workbench ${analysisView === 'investment' ? 'analysis-investment-workbench' : ''}`}>
+          {analysisView === 'pools' ? <aside className="analysis-sidebar">
             <div className="analysis-sidebar-summary">
               <span>分析样本</span>
               <strong>{visibleInsights?.total_records?.toLocaleString() ?? 0}</strong>
               <small>{includeMock ? '官方 + 模拟记录' : '仅官方记录'}</small>
-              <div className="mt-3 flex rounded-md border border-white/[0.06] bg-white/[0.025] p-0.5">
+              {analysisView === 'pools' ? <div className="mt-3 flex rounded-md border border-white/[0.06] bg-white/[0.025] p-0.5">
                 {(['all', 'custom'] as const).map((mode) => <button type="button" key={mode} onClick={() => setAnalysisDateMode(mode)} className={`flex-1 rounded px-2 py-1.5 text-[10px] ${dateMode === mode ? 'bg-white/[0.08] text-tide' : 'text-wave hover:text-tide'}`}>{mode === 'all' ? '全部时间' : '自定义'}</button>)}
-              </div>
-              {dateMode === 'custom' ? (
+              </div> : <small className="mt-3 block text-wave">角色投入按全部历史记录汇总</small>}
+              {analysisView === 'pools' && dateMode === 'custom' ? (
                 <div className="mt-2 space-y-1.5">
                   <ThemedDateInput value={startDate} min={activeSummary?.earliest_time.slice(0, 10)} max={endDate || activeSummary?.latest_time.slice(0, 10)} onChange={setStartDate} label="分析开始日期" />
                   <ThemedDateInput value={endDate} min={startDate || activeSummary?.earliest_time.slice(0, 10)} max={activeSummary?.latest_time.slice(0, 10)} onChange={setEndDate} label="分析结束日期" />
@@ -954,7 +1053,7 @@ export default function AnalyticsPage() {
                 </div>
               ) : null}
             </div>
-            {visibleInsights && visibleInsights.pools.length > 0 ? (
+            {analysisView === 'pools' && visibleInsights && visibleInsights.pools.length > 0 ? (
               <nav ref={poolNavRef} className="analysis-pool-list" aria-label="分析卡池">
                 <motion.div
                   initial={false}
@@ -986,11 +1085,28 @@ export default function AnalyticsPage() {
                 })}
               </nav>
             ) : null}
-          </aside>
+          </aside> : null}
 
           <main className="analysis-main">
             <div className="analysis-content">
-              {dateMode === 'custom' && (!startDate || !endDate || startDate > endDate) ? (
+              {analysisView === 'investment' ? (
+                investmentLoading ? (
+                  <div className="analysis-loading-state" aria-busy="true" aria-label="正在统计角色投入"><div className="analysis-loading-line analysis-loading-line-wide" /><div className="analysis-loading-line analysis-loading-line-medium" /><div className="analysis-loading-grid"><span /><span /></div></div>
+                ) : investmentFailed ? (
+                  <div className="flex flex-1 flex-col items-center justify-center gap-3"><div className="text-sm text-danger">角色投入数据读取失败</div><button type="button" onClick={() => setAnalysisView('pools')} className="rounded-md border border-white/[0.08] px-3 py-2 text-xs text-wave hover:text-tide">返回卡池分析</button></div>
+                ) : investmentRows.length === 0 ? (
+                  <ResonanceEmptyState variant="records" title="暂无角色与专武投入记录" description="完成角色或专武的五星记录后，这里会显示整体换取成本" />
+                ) : (
+                  <motion.div key="investment-view" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className="space-y-4 pb-7">
+                    <section className="analysis-chart-panel overflow-hidden">
+                      <div className="flex flex-wrap items-center justify-between gap-3"><h3>每个角色的换取成本</h3><div className="flex items-center gap-3"><div className="flex rounded-md border border-white/[0.08] bg-white/[0.025] p-0.5" role="group" aria-label="角色投入排序"><button type="button" onClick={() => setInvestmentSort('release')} className={`rounded px-2.5 py-1 text-[10px] ${investmentSort === 'release' ? 'bg-white/[0.10] text-tide' : 'text-wave hover:text-tide'}`}>官方顺序</button><button type="button" onClick={() => setInvestmentSort('total')} className={`rounded px-2.5 py-1 text-[10px] ${investmentSort === 'total' ? 'bg-white/[0.10] text-tide' : 'text-wave hover:text-tide'}`}>总抽数</button></div><span className="text-[10px] text-wave">共 {investmentRows.length} 组</span></div></div>
+                      <div className="mt-4 overflow-x-auto">
+                        <table className="w-full min-w-[680px] text-left text-xs"><thead className="text-[10px] text-wave"><tr className="border-b border-white/[0.07]"><th className="pb-2 font-normal">角色</th><th className="pb-2 font-normal">对应专武</th><th className="pb-2 text-right font-normal">角色总抽数</th><th className="pb-2 text-right font-normal">专武总抽数</th><th className="pb-2 text-right font-normal">合计</th></tr></thead><tbody>{investmentRows.map((row) => { const total = row.rolePulls + row.weaponPulls; return <tr key={row.role.resource_id} className="border-b border-white/[0.05] last:border-0"><td className="py-3"><div className="flex items-center gap-2"><ResourceIcon resourceId={row.role.resource_id} alt="" className="h-9 w-9 rounded object-cover" fallback={<span className="flex h-9 w-9 items-center justify-center rounded bg-white/[0.06] text-wave">{row.role.name.charAt(0)}</span>} /><div><div className="text-tide">{row.role.name}</div><div className="text-[10px] text-wave">{row.roleCount > 0 ? `${row.roleCount} 次获取 · ${row.roleAverage === null ? '—' : `${row.roleLowerBound ? '≥' : ''}${row.roleAverage.toFixed(1)} 抽/次`}` : '未获取'}</div></div></div></td><td className="py-3"><div className="flex items-center gap-2"><ResourceIcon resourceId={row.weapon.resource_id} alt="" className="h-9 w-9 rounded object-contain" fallback={<span className="flex h-9 w-9 items-center justify-center rounded bg-white/[0.06] text-wave">{row.weapon.name.charAt(0)}</span>} /><div><div className="text-tide">{row.weapon.name}</div><div className="text-[10px] text-wave">{row.weaponCount > 0 ? `${row.weaponCount} 次获取 · ${row.weaponAverage === null ? '—' : `${row.weaponLowerBound ? '≥' : ''}${row.weaponAverage.toFixed(1)} 抽/次`}` : '未获取'}</div></div></div></td><td className="py-3 text-right tabular-nums text-tide">{row.roleCount > 0 ? `${row.roleLowerBound ? '≥' : ''}${row.rolePulls} 抽` : '—'}</td><td className="py-3 text-right tabular-nums text-tide">{row.weaponCount > 0 ? `${row.weaponLowerBound ? '≥' : ''}${row.weaponPulls} 抽` : '—'}</td><td className="py-3 text-right text-base font-semibold tabular-nums text-[#d8bd84]">{total} 抽</td></tr>; })}</tbody></table>
+                      </div>
+                    </section>
+                  </motion.div>
+                )
+              ) : dateMode === 'custom' && (!startDate || !endDate || startDate > endDate) ? (
                 <ResonanceEmptyState variant="filter" title="请选择有效日期范围" description="调整开始和结束日期，或切换回全部时间" />
               ) : !activePlayerId && initialized ? (
                 <ResonanceEmptyState variant="records" title="暂无可分析记录" description="完成一次扫描或导入后，这里会显示历史出金表现" />

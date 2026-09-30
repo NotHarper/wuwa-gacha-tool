@@ -2503,6 +2503,7 @@ mod tests {
             quality_level,
             resource_type: resource_type.to_string(),
             signature_weapon_id: None,
+            release_order: None,
         }
     }
 

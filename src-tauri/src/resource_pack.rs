@@ -669,6 +669,7 @@ mod tests {
                 quality_level: 5,
                 resource_type: "role".to_string(),
                 signature_weapon_id: None,
+                release_order: None,
             }],
         }
     }
