@@ -24,6 +24,10 @@ dist-ssr/
 src-tauri/target/
 src-tauri/gen/
 
+# Updater signing keys (private key must never enter version control)
+*.key
+*.key.pub
+
 # Database
 *.db
 *.db-shm
